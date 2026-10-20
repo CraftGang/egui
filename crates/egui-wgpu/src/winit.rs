@@ -17,9 +17,85 @@ struct SurfaceState {
     alpha_mode: wgpu::CompositeAlphaMode,
     width: u32,
     height: u32,
+    // PdfCraft patch (#577): `width` and `height` are the size the surface is configured at,
+    // which `surface_fit` keeps within the device's `max_texture_dimension_2d`; these are the
+    // window's own size, and `render_scale` is how much smaller the surface is drawn.
+    window_width: u32,
+    window_height: u32,
+    render_scale: f32,
     resizing: bool,
     needs_reconfigure: bool,
     needs_recreate: bool,
+}
+
+/// PdfCraft patch (#577): the size to configure a window's surface at, and the factor egui
+/// draws it at, so that neither side exceeds `max_side` (the device's
+/// `max_texture_dimension_2d`).
+///
+/// `Surface::configure` rejects a larger surface, and wgpu reports that as an uncaptured
+/// validation error, which panics: a window bigger than the GPU's limit (restored at another
+/// monitor's scale, stretched across monitors, …) closed the app before it opened. Both sides
+/// shrink by the same factor and egui draws at that factor, so the whole window is drawn into
+/// the surface. Where the swapchain is stretched over the window (DX12 uses
+/// `DXGI_SCALING_STRETCH`) it fills the window and lines up with the pointer, only softer;
+/// wgpu's GL backend copies it unscaled into a corner instead. Degraded either way, but not a
+/// crash. A window within the limit is returned unchanged, with a factor of 1. The longer side
+/// becomes exactly `max_side`, and a side that isn't zero never becomes zero (an empty surface
+/// can't be configured either).
+pub fn surface_fit(width: u32, height: u32, max_side: u32) -> (u32, u32, f32) {
+    let max_side = max_side.max(1);
+    if width <= max_side && height <= max_side {
+        return (width, height, 1.0);
+    }
+    let longest = width.max(height);
+    let scale = (f64::from(max_side) / f64::from(longest)).min(1.0);
+    // `as` saturates and `scale` is finite and in (0, 1]: no overflow, NaN or panic. The longer
+    // side is set rather than computed, so floating-point rounding can't leave it a pixel short.
+    let fit = |side: u32| {
+        if side == 0 {
+            0
+        } else if side == longest {
+            max_side
+        } else {
+            ((f64::from(side) * scale).floor() as u32).clamp(1, max_side)
+        }
+    };
+    (fit(width), fit(height), scale as f32)
+}
+
+/// PdfCraft patch (#519): runs `f` and returns an error it raises on `device`, instead of
+/// handing it to wgpu's uncaptured-error handler, which panics by default.
+///
+/// eframe configures a window's surface before the app is created, so no app code can install
+/// a handler in time, and a surface the device can't configure closed the app before its window
+/// appeared: wgpu's GL backend on a 2015 Intel driver timed out waiting for the GPU to go idle
+/// (`ConfigureSurfaceError::GpuWaitTimeout`). Returned as an error instead, eframe returns
+/// `Error::Wgpu` and the app can fall back (PdfCraft retries with OpenGL).
+///
+/// Validation, out-of-memory and internal errors are caught, one scope each; each scope keeps
+/// the first error of its kind, and a validation error is returned before an out-of-memory one,
+/// which is returned before an internal one. Not caught: a lost device (wgpu reports that only
+/// to the device-lost callback, so `f` seems to succeed), a panic inside `f`, and errors raised
+/// on other threads (wgpu's error scopes belong to the calling thread).
+pub async fn catch_errors<T>(
+    device: &wgpu::Device,
+    f: impl FnOnce() -> T,
+) -> Result<T, wgpu::Error> {
+    let validation = device.push_error_scope(wgpu::ErrorFilter::Validation);
+    let out_of_memory = device.push_error_scope(wgpu::ErrorFilter::OutOfMemory);
+    let internal = device.push_error_scope(wgpu::ErrorFilter::Internal);
+    // Should `f` panic, the guards pop their scopes as they drop, innermost first.
+    let value = f();
+    // Popped innermost first, as wgpu requires; each pop takes effect at once.
+    let internal = internal.pop();
+    let out_of_memory = out_of_memory.pop();
+    let validation = validation.pop();
+    let (validation, out_of_memory, internal) =
+        (validation.await, out_of_memory.await, internal.await);
+    match validation.or(out_of_memory).or(internal) {
+        Some(error) => Err(error),
+        None => Ok(value),
+    }
 }
 
 /// Everything you need to paint egui with [`wgpu`] on [`winit`].
@@ -155,11 +231,12 @@ impl Painter {
         };
 
         let surface = self.instance.create_surface(Arc::clone(window))?;
+        // PdfCraft patch (#577): the window's size; `width` and `height` may have been fitted.
         self.install_surface(
             surface,
             viewport_id,
-            old_state.width,
-            old_state.height,
+            old_state.window_width,
+            old_state.window_height,
             old_state.resizing,
         );
         Ok(())
@@ -241,13 +318,31 @@ impl Painter {
         viewport_id: ViewportId,
         size: winit::dpi::PhysicalSize<u32>,
     ) -> Result<(), crate::WgpuError> {
-        if self.render_state.is_none() {
-            let render_state =
+        // PdfCraft patch (#519): the device is kept for `catch_errors` below.
+        let render_state = match self.render_state.take() {
+            Some(render_state) => render_state,
+            None => {
                 RenderState::create(&self.config, &self.instance, Some(&surface), self.options)
-                    .await?;
-            self.render_state = Some(render_state);
+                    .await?
+            }
+        };
+        let device = render_state.device.clone();
+        self.render_state = Some(render_state);
+        // PdfCraft patch (#519): a surface the device can't configure is returned as an error
+        // instead of wgpu's default handler panicking; for the root window at start-up, eframe
+        // returns it as `Error::Wgpu` before the app is created, and the app can fall back.
+        // Nothing is kept for the window. A window whose size is zero here is first configured
+        // later, on resize, outside this.
+        let installed = catch_errors(&device, || {
+            self.install_surface(surface, viewport_id, size.width, size.height, false);
+        })
+        .await;
+        if let Err(error) = installed {
+            self.surfaces.remove(&viewport_id);
+            self.depth_texture_view.remove(&viewport_id);
+            self.msaa_texture_view.remove(&viewport_id);
+            return Err(crate::WgpuError::ConfigureSurface(error));
         }
-        self.install_surface(surface, viewport_id, size.width, size.height, false);
         Ok(())
     }
 
@@ -288,12 +383,18 @@ impl Painter {
                 wgpu::CompositeAlphaMode::Auto
             }
         };
+        // PdfCraft patch (#577): store the fitted size, so nothing configures the window's own.
+        // `render_scale` starts at 1 so that the resize below, which sets it, logs the fit once.
+        let (fit_width, fit_height, _) = surface_fit(width, height, self.max_surface_side());
         self.surfaces.insert(
             viewport_id,
             SurfaceState {
                 surface,
-                width,
-                height,
+                width: fit_width,
+                height: fit_height,
+                window_width: width,
+                window_height: height,
+                render_scale: 1.0,
                 alpha_mode,
                 resizing,
                 needs_reconfigure: false,
@@ -322,6 +423,14 @@ impl Painter {
             .map(|rs| rs.device.limits().max_texture_dimension_2d as usize)
     }
 
+    /// PdfCraft patch (#577): the largest side a surface may be configured at, or no limit
+    /// before the device exists (nothing is configured then).
+    fn max_surface_side(&self) -> u32 {
+        self.render_state
+            .as_ref()
+            .map_or(u32::MAX, |rs| rs.device.limits().max_texture_dimension_2d)
+    }
+
     fn resize_and_generate_depth_texture_view_and_msaa_view(
         &mut self,
         viewport_id: ViewportId,
@@ -330,14 +439,26 @@ impl Painter {
     ) {
         profiling::function_scope!();
 
-        let width = width_in_pixels.get();
-        let height = height_in_pixels.get();
+        // PdfCraft patch (#577): configure the surface, and size the depth and MSAA textures,
+        // within the device's limit; `surface_fit` keeps a non-zero side non-zero.
+        let max_side = self.max_surface_side();
+        let (window_width, window_height) = (width_in_pixels.get(), height_in_pixels.get());
+        let (width, height, render_scale) = surface_fit(window_width, window_height, max_side);
 
         let render_state = self.render_state.as_ref().unwrap();
         let surface_state = self.surfaces.get_mut(&viewport_id).unwrap();
 
+        if render_scale < 1.0 && surface_state.render_scale >= 1.0 {
+            log::warn!(
+                "the window is {window_width} × {window_height} pixels, more than this GPU draws \
+                 ({max_side} a side): drawing it at {width} × {height} and scaling it up"
+            );
+        }
         surface_state.width = width;
         surface_state.height = height;
+        surface_state.window_width = window_width;
+        surface_state.window_height = window_height;
+        surface_state.render_scale = render_scale;
 
         Self::configure_surface(surface_state, render_state, &self.config.surface);
 
@@ -558,9 +679,10 @@ impl Painter {
                 });
 
         // Upload all resources for the GPU.
+        // PdfCraft patch (#577): a surface fitted within the GPU's limit is drawn smaller.
         let screen_descriptor = renderer::ScreenDescriptor {
             size_in_pixels: [surface_state.width, surface_state.height],
-            pixels_per_point,
+            pixels_per_point: pixels_per_point * surface_state.render_scale,
         };
 
         let user_cmd_bufs = {

@@ -579,6 +579,7 @@ impl<'t> TextEdit<'t> {
                 LayoutJob::simple_singleline(text, font_id.clone(), text_color)
             };
             layout_job.halign = align.x();
+            layout_job.language = ui.language();
             // We want to keep the trailing whitespace, since hiding it feels really weird when typing
             layout_job.keep_trailing_whitespace = true;
 

@@ -190,6 +190,9 @@ impl Label {
             FontSelection::Default,
             valign,
         ));
+        if layout_job.language.is_none() {
+            layout_job.language = ui.language();
+        }
 
         let available_width = ui.available_width();
 
@@ -294,6 +297,7 @@ impl Widget for Label {
                 let job = crate::text::LayoutJob {
                     sections: galley.job.sections.clone(),
                     text: galley.job.text.clone(),
+                    language: galley.job.language.clone(),
                     ..crate::text::LayoutJob::default()
                 };
                 // Show the full (non-elided) text on hover:

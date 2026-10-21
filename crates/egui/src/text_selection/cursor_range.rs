@@ -238,31 +238,31 @@ impl CCursorRange {
 
 // ----------------------------------------------------------------------------
 
-fn ccursor_from_accesskit_text_position(
+pub(super) fn ccursor_from_accesskit_text_position(
     id: Id,
     galley: &Galley,
     position: &accesskit::TextPosition,
 ) -> Option<CCursor> {
-    use super::accesskit_text::MAX_CHARS_PER_TEXT_RUN;
+    use super::accesskit_text::row_text_runs;
 
     let mut total_length = 0usize;
     for (i, row) in galley.rows.iter().enumerate() {
         let row_chars = row.glyphs.len() + (row.ends_with_newline as usize);
-        let num_chunks = if row_chars == 0 {
-            1
-        } else {
-            row_chars.div_ceil(MAX_CHARS_PER_TEXT_RUN)
-        };
 
-        for chunk_idx in 0..num_chunks {
-            let run_id = id.with(i).with(chunk_idx);
+        let runs = row_text_runs(row);
+        let num_runs = runs.len();
+        for (run_index, run) in runs.into_iter().enumerate() {
+            let run_id = id.with(i).with(run_index);
             if run_id.accesskit_id() == position.node {
-                let column = chunk_idx * MAX_CHARS_PER_TEXT_RUN + position.character_index;
+                let column = run.start + position.character_index;
+                let at_wrap = column == row.glyphs.len()
+                    && !row.ends_with_newline
+                    && (i + 1) < galley.rows.len();
+                // The end of a run that another run follows on this row sticks to the char before it:
+                let at_run_end = column == run.end && run_index + 1 < num_runs;
                 return Some(CCursor {
                     index: CharIndex(total_length + column),
-                    prefer_next_row: !(column == row.glyphs.len()
-                        && !row.ends_with_newline
-                        && (i + 1) < galley.rows.len()),
+                    prefer_next_row: !(at_wrap || at_run_end),
                 });
             }
         }

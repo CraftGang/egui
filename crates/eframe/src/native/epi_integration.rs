@@ -240,6 +240,7 @@ impl EpiIntegration {
             raw_display_handle: window.display_handle().map(|h| h.as_raw()),
             raw_window_handle: window.window_handle().map(|h| h.as_raw()),
             activation_token: None,
+            egui_ctx: Some(egui_ctx.clone()),
         };
 
         let icon = native_options

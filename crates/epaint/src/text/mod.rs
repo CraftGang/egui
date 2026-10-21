@@ -15,6 +15,7 @@ mod glyph_atlas;
 mod glyph_rasterizer;
 pub mod grapheme;
 mod index;
+mod line_break;
 mod styled_metrics;
 mod text_layout;
 mod text_layout_types;
@@ -32,6 +33,7 @@ pub use {
         has_emoji_presentation,
     },
     index::{ByteIndex, ByteRange, ByteRangeExt, CharIndex, CharRange, CharRangeExt},
+    line_break::{LineBreak, LineBreakKind, LineBreaker, SimpleLineBreaker},
     text_layout_types::*,
 };
 

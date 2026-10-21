@@ -118,6 +118,12 @@ pub struct LayoutJob {
     /// If `true`, trailing whitespace is included in the row width used for alignment.
     /// This is desirable for text editors where the user expects to see their spaces.
     pub keep_trailing_whitespace: bool,
+
+    /// The language of the text, as a BCP 47 tag (`"th"`, `"ja-JP"`), if known.
+    ///
+    /// Passed to the [`crate::text::LineBreaker`], which may break rows differently
+    /// for some languages, e.g. Korean word by word. Default: `None` (unknown).
+    pub language: Option<String>,
 }
 
 impl Default for LayoutJob {
@@ -135,6 +141,7 @@ impl Default for LayoutJob {
             justify: false,
             round_output_to_gui: true,
             keep_trailing_whitespace: false,
+            language: None,
         }
     }
 }
@@ -345,6 +352,7 @@ impl core::hash::Hash for LayoutJob {
             justify,
             round_output_to_gui,
             keep_trailing_whitespace,
+            language,
         } = self;
 
         text.hash(state);
@@ -358,6 +366,7 @@ impl core::hash::Hash for LayoutJob {
         justify.hash(state);
         round_output_to_gui.hash(state);
         keep_trailing_whitespace.hash(state);
+        language.hash(state);
     }
 }
 

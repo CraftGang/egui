@@ -438,6 +438,16 @@ impl State {
             }
 
             WindowEvent::Ime(ime) => {
+                if matches!(ime, winit::event::Ime::Commit(_))
+                    && let Some((before_bytes, after_bytes)) = ime_delete_surrounding(window)
+                {
+                    self.egui_input.events.push(egui::Event::Ime(
+                        egui::ImeEvent::DeleteSurroundingBytes {
+                            before_bytes,
+                            after_bytes,
+                        },
+                    ));
+                }
                 self.on_ime(ime);
 
                 EventResponse {
@@ -1630,6 +1640,30 @@ fn latin_letter(
         windows_virtual_letter(windows_virtual_key(event.physical_key)),
         false,
     )
+}
+
+/// The text around the cursor an input method deletes before the [`winit::event::Ime::Commit`]
+/// being handled, in bytes before and after the selection or pre-edit text.
+fn ime_delete_surrounding(window: &Window) -> Option<(usize, usize)> {
+    #[cfg(target_os = "macos")]
+    {
+        use winit::platform::macos::WindowExtMacOS as _;
+        window
+            .take_ime_delete_surrounding()
+            .map(|delete| (delete.before_bytes, delete.after_bytes))
+    }
+    #[cfg(all(feature = "wayland", target_os = "linux"))]
+    {
+        use winit::platform::wayland::WindowExtWayland as _;
+        window
+            .take_ime_delete_surrounding()
+            .map(|delete| (delete.before_bytes, delete.after_bytes))
+    }
+    #[cfg(not(any(target_os = "macos", all(feature = "wayland", target_os = "linux"))))]
+    {
+        let _ = window;
+        None
+    }
 }
 
 /// With ⌘ held, letters come from the layout's ⌘ table, which differs from what the layout

@@ -1482,6 +1482,20 @@ fn events(
                     } => Some(CursorMutation::ImeCompositionCursorRange(
                         text.delete_surrounding_chars(cursor_range, *before_chars, *after_chars),
                     )),
+                    ImeEvent::DeleteSurroundingBytes {
+                        before_bytes,
+                        after_bytes,
+                    } => {
+                        let [before_chars, after_chars] = surrounding_bytes_to_chars(
+                            text.as_str(),
+                            &cursor_range,
+                            *before_bytes,
+                            *after_bytes,
+                        );
+                        Some(CursorMutation::ImeCompositionCursorRange(
+                            text.delete_surrounding_chars(cursor_range, before_chars, after_chars),
+                        ))
+                    }
                 }
             }
 
@@ -1522,6 +1536,33 @@ fn events(
     );
 
     (any_change, cursor_range)
+}
+
+/// The characters an input method deletes: those within `before_bytes` before the start of
+/// `cursor_range` and within `after_bytes` after its end. A count that ends inside a character
+/// leaves that character.
+fn surrounding_bytes_to_chars(
+    text: &str,
+    cursor_range: &CCursorRange,
+    before_bytes: usize,
+    after_bytes: usize,
+) -> [usize; 2] {
+    use text_selection::text_cursor_state::byte_index_from_char_index;
+
+    let [min, max] = cursor_range.sorted_cursors();
+    let min = byte_index_from_char_index(text, min.index).0;
+    let max = byte_index_from_char_index(text, max.index).0;
+    let from = min.saturating_sub(before_bytes);
+    let before = text[..min]
+        .char_indices()
+        .rev()
+        .take_while(|(index, _)| *index >= from)
+        .count();
+    let after = text[max..]
+        .char_indices()
+        .take_while(|(index, c)| index + c.len_utf8() <= after_bytes)
+        .count();
+    [before, after]
 }
 
 /// Replace the selection with `text_to_insert`, the way a paste does: single-line fields turn

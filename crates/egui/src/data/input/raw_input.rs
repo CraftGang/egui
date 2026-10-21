@@ -89,6 +89,14 @@ pub struct RawInput {
     ///
     /// `None` means "don't know".
     pub system_theme: Option<Theme>,
+
+    /// Does the active keyboard layout type Latin letters (US, AZERTY, Dvorak), rather than
+    /// another script (Russian, Greek, Arabic)?
+    ///
+    /// This is the platform's answer for the whole layout, as of the last key event, for
+    /// matching shortcuts by letter. `None` means "don't know": `egui-winit` reports it on
+    /// Linux (X11 and Wayland) only.
+    pub keyboard_layout_is_latin: Option<bool>,
 }
 
 impl Default for RawInput {
@@ -105,12 +113,21 @@ impl Default for RawInput {
             dropped_files: Default::default(),
             focused: true, // integrations opt into global focus tracking
             system_theme: None,
+            keyboard_layout_is_latin: None,
             safe_area_insets: Default::default(),
         }
     }
 }
 
 impl RawInput {
+    /// Does the active keyboard layout type Latin letters? `None` means "don't know".
+    ///
+    /// Returns the field of the same name.
+    #[inline]
+    pub fn keyboard_layout_is_latin(&self) -> Option<bool> {
+        self.keyboard_layout_is_latin
+    }
+
     /// Info about the active viewport
     #[inline]
     pub fn viewport(&self) -> &ViewportInfo {
@@ -139,6 +156,7 @@ impl RawInput {
             dropped_files: core::mem::take(&mut self.dropped_files),
             focused: self.focused,
             system_theme: self.system_theme,
+            keyboard_layout_is_latin: self.keyboard_layout_is_latin,
         }
     }
 
@@ -156,6 +174,7 @@ impl RawInput {
             mut dropped_files,
             focused,
             system_theme,
+            keyboard_layout_is_latin,
             safe_area_insets: safe_area,
         } = newer;
 
@@ -170,6 +189,7 @@ impl RawInput {
         self.dropped_files.append(&mut dropped_files);
         self.focused = focused;
         self.system_theme = system_theme;
+        self.keyboard_layout_is_latin = keyboard_layout_is_latin.or(self.keyboard_layout_is_latin);
         self.safe_area_insets = safe_area.or(self.safe_area_insets);
     }
 }
@@ -188,6 +208,7 @@ impl RawInput {
             dropped_files,
             focused,
             system_theme,
+            keyboard_layout_is_latin,
             safe_area_insets: safe_area,
         } = self;
 
@@ -217,6 +238,9 @@ impl RawInput {
         ui.label(format!("dropped_files: {}", dropped_files.len()));
         ui.label(format!("focused: {focused}"));
         ui.label(format!("system_theme: {system_theme:?}"));
+        ui.label(format!(
+            "keyboard_layout_is_latin: {keyboard_layout_is_latin:?}"
+        ));
         ui.label(format!("safe_area: {safe_area:?}"));
         ui.scope(|ui| {
             ui.set_min_height(150.0);

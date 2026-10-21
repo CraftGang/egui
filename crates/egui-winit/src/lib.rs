@@ -1110,9 +1110,25 @@ impl State {
             None
         };
 
-        let logical_key = key_from_winit_key(winit_logical_key);
-        #[cfg(target_os = "windows")]
-        let logical_key = windows_letter_key(logical_key, windows_virtual_key(event.physical_key));
+        let (latin_key, prefer_latin) = latin_letter(event, self.modifiers);
+        // The platforms winit reports Latin layouts on: X11 and Wayland.
+        #[cfg(all(
+            unix,
+            not(target_vendor = "apple"),
+            not(target_os = "android"),
+            not(target_os = "emscripten"),
+            not(target_os = "redox"),
+            any(feature = "x11", feature = "wayland")
+        ))]
+        {
+            use winit::platform::latin_layout::KeyEventExtLatinLayout as _;
+            self.egui_input.keyboard_layout_is_latin = Some(event.is_latin_layout());
+        }
+        let logical_key = letter_key(
+            key_from_winit_key(winit_logical_key),
+            latin_key,
+            prefer_latin,
+        );
 
         // Helpful logging to enable when adding new key support
         log::trace!(
@@ -1574,29 +1590,107 @@ fn key_from_winit_key(key: &winit::keyboard::Key) -> Option<egui::Key> {
     }
 }
 
-/// Letter keys take the letter of their Windows virtual-key code, unless the layout
-/// types an A–Z letter there itself (Dvorak, AZERTY keep what they type).
+/// A letter key's egui key, for shortcuts.
 ///
-/// On layouts without Latin letters (Russian, Greek, Arabic, Hebrew, Thai) this makes
-/// Ctrl+C match the key Windows calls C, as it does in native Windows apps.
-#[cfg(any(target_os = "windows", test))]
-fn windows_letter_key(
+/// `latin_key` is the Latin letter the platform gives this key: the Windows virtual-key
+/// letter, the macOS ⌘-table key, or the key on the first Latin layout on Linux. It replaces
+/// what the layout types when `prefer_latin`, and when the layout doesn't type an A–Z letter
+/// there. Otherwise Latin layouts (Dvorak, AZERTY) keep the letters they type.
+///
+/// On layouts without Latin letters (Russian, Greek, Arabic, Hebrew, Thai) this makes Ctrl+C
+/// match the key the platform calls C, as it does in native apps.
+fn letter_key(
     logical_key: Option<egui::Key>,
-    virtual_key: Option<u32>,
+    latin_key: Option<egui::Key>,
+    prefer_latin: bool,
 ) -> Option<egui::Key> {
     let is_letter = |key: &egui::Key| {
         let name = key.name();
         name.len() == 1 && name.as_bytes()[0].is_ascii_alphabetic()
     };
-    // VK_A to VK_Z are the ASCII codes of 'A' to 'Z'.
-    let virtual_letter = virtual_key
-        .and_then(char::from_u32)
-        .filter(char::is_ascii_uppercase)
-        .and_then(|c| egui::Key::from_name(c.encode_utf8(&mut [0; 4])));
-    logical_key
-        .filter(is_letter)
-        .or(virtual_letter)
-        .or(logical_key)
+    let latin_letter = latin_key.filter(is_letter);
+    if prefer_latin {
+        latin_letter.or(logical_key)
+    } else {
+        logical_key
+            .filter(is_letter)
+            .or(latin_letter)
+            .or(logical_key)
+    }
+}
+
+/// The platform's Latin letter for this key, and whether it takes precedence over the letter
+/// the layout types (see [`letter_key`]).
+#[cfg(target_os = "windows")]
+fn latin_letter(
+    event: &winit::event::KeyEvent,
+    _modifiers: egui::Modifiers,
+) -> (Option<egui::Key>, bool) {
+    (
+        windows_virtual_letter(windows_virtual_key(event.physical_key)),
+        false,
+    )
+}
+
+/// With ⌘ held, letters come from the layout's ⌘ table, which differs from what the layout
+/// types on non-Latin layouts and on layouts like "Dvorak – QWERTY ⌘".
+#[cfg(target_os = "macos")]
+fn latin_letter(
+    event: &winit::event::KeyEvent,
+    modifiers: egui::Modifiers,
+) -> (Option<egui::Key>, bool) {
+    use winit::platform::macos::KeyEventExtMacOS as _;
+    if modifiers.mac_cmd {
+        (key_from_winit_key(&event.key_with_command()), true)
+    } else {
+        (None, false)
+    }
+}
+
+/// On a non-Latin layout, letters come from the first Latin layout the user has configured.
+#[cfg(all(
+    unix,
+    not(target_vendor = "apple"),
+    not(target_os = "android"),
+    not(target_os = "emscripten"),
+    not(target_os = "redox"),
+    any(feature = "x11", feature = "wayland")
+))]
+fn latin_letter(
+    event: &winit::event::KeyEvent,
+    _modifiers: egui::Modifiers,
+) -> (Option<egui::Key>, bool) {
+    use winit::platform::latin_layout::KeyEventExtLatinLayout as _;
+    (
+        event.latin_key().as_ref().and_then(key_from_winit_key),
+        !event.is_latin_layout(),
+    )
+}
+
+#[cfg(not(any(
+    target_os = "windows",
+    target_os = "macos",
+    all(
+        unix,
+        not(target_vendor = "apple"),
+        not(target_os = "android"),
+        not(target_os = "emscripten"),
+        not(target_os = "redox"),
+        any(feature = "x11", feature = "wayland")
+    )
+)))]
+fn latin_letter(
+    _event: &winit::event::KeyEvent,
+    _modifiers: egui::Modifiers,
+) -> (Option<egui::Key>, bool) {
+    (None, false)
+}
+
+/// The letter of a Windows virtual-key code: `VK_A` to `VK_Z` are the ASCII codes of 'A' to 'Z'.
+#[cfg(any(target_os = "windows", test))]
+fn windows_virtual_letter(virtual_key: Option<u32>) -> Option<egui::Key> {
+    let c = char::from_u32(virtual_key?).filter(char::is_ascii_uppercase)?;
+    egui::Key::from_name(c.encode_utf8(&mut [0; 4]))
 }
 
 /// The virtual-key code the current keyboard layout gives this physical key.
@@ -2726,15 +2820,16 @@ mod tests {
     use super::*;
 
     #[test]
-    fn windows_letter_keys() {
+    fn letter_keys() {
         use egui::Key;
         const VK_RETURN: u32 = 0x0D;
         const VK_OEM_2: u32 = 0xBF;
         const VK_OEM_3: u32 = 0xC0;
         let vk = |c: char| Some(c as u32);
+        let key = |text: &str| key_from_winit_key(&winit::keyboard::Key::Character(text.into()));
 
-        // (layout, logical key, virtual-key code, expected key)
-        let table = [
+        // Windows: (layout, typed, virtual-key code, expected key)
+        let windows = [
             ("US", "c", vk('C'), Some(Key::C)),
             ("Dvorak", "c", vk('C'), Some(Key::C)),
             ("AZERTY", "a", vk('A'), Some(Key::A)),
@@ -2750,18 +2845,62 @@ mod tests {
             ("Thai", "แ", vk('C'), Some(Key::C)),
             ("Thai", "ฟ", None, None),
         ];
-        for (layout, text, virtual_key, expected) in table {
-            let logical = key_from_winit_key(&winit::keyboard::Key::Character(text.into()));
-            assert_eq!(
-                windows_letter_key(logical, virtual_key),
-                expected,
-                "{layout} {text:?}"
-            );
+        for (layout, typed, virtual_key, expected) in windows {
+            let got = letter_key(key(typed), windows_virtual_letter(virtual_key), false);
+            assert_eq!(got, expected, "Windows {layout} {typed:?}");
+        }
+
+        // Linux: (layout, typed, `latin_key()`, `is_latin_layout()`, expected key)
+        let linux = [
+            ("US", "c", None, true, Some(Key::C)),
+            ("Dvorak", "j", None, true, Some(Key::J)),
+            ("AZERTY", "a", None, true, Some(Key::A)),
+            ("Russian", "с", Some("c"), false, Some(Key::C)),
+            ("Russian", "Ф", Some("a"), false, Some(Key::A)),
+            ("Russian", ".", None, false, Some(Key::Period)),
+            ("Russian, no Latin layout", "с", None, false, None),
+            ("Greek", "ψ", Some("c"), false, Some(Key::C)),
+            ("Hebrew", "ב", Some("c"), false, Some(Key::C)),
+            ("Arabic", "ؤ", Some("c"), false, Some(Key::C)),
+            ("Thai", "แ", Some("c"), false, Some(Key::C)),
+            ("Russian with Dvorak", "с", Some("j"), false, Some(Key::J)),
+        ];
+        for (layout, typed, latin, is_latin_layout, expected) in linux {
+            let got = letter_key(key(typed), latin.and_then(key), !is_latin_layout);
+            assert_eq!(got, expected, "Linux {layout} {typed:?}");
+        }
+
+        // macOS: (layout, typed, `key_with_command()`, ⌘ held, expected key)
+        let macos = [
+            ("US", "c", "c", true, Some(Key::C)),
+            ("Dvorak", "j", "j", true, Some(Key::J)),
+            ("AZERTY", "a", "a", true, Some(Key::A)),
+            ("Dvorak – QWERTY ⌘", "j", "c", true, Some(Key::C)),
+            ("Dvorak – QWERTY ⌘", "j", "c", false, Some(Key::J)),
+            ("Russian", "с", "c", true, Some(Key::C)),
+            ("Russian", "с", "c", false, None),
+            ("Russian", "/", "/", true, Some(Key::Slash)),
+            ("Greek", "ψ", "c", true, Some(Key::C)),
+            ("Hebrew", "ב", "c", true, Some(Key::C)),
+            ("Arabic", "ؤ", "c", true, Some(Key::C)),
+            ("Thai", "แ", "c", true, Some(Key::C)),
+        ];
+        for (layout, typed, with_command, command, expected) in macos {
+            // Mirrors the macOS `latin_letter`.
+            let (latin, prefer_latin) = if command {
+                (key(with_command), true)
+            } else {
+                (None, false)
+            };
+            let got = letter_key(key(typed), latin, prefer_latin);
+            assert_eq!(got, expected, "macOS {layout} {typed:?} ⌘ {command}");
         }
 
         let enter = key_from_winit_key(&winit::keyboard::Key::Named(
             winit::keyboard::NamedKey::Enter,
         ));
-        assert_eq!(windows_letter_key(enter, Some(VK_RETURN)), Some(Key::Enter));
+        let enter_vk = windows_virtual_letter(Some(VK_RETURN));
+        assert_eq!(letter_key(enter, enter_vk, false), Some(Key::Enter));
+        assert_eq!(letter_key(enter, None, true), Some(Key::Enter));
     }
 }

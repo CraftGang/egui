@@ -740,9 +740,8 @@ pub struct Frame {
     #[cfg(not(target_arch = "wasm32"))]
     pub(crate) activation_token: Option<String>,
 
-    /// See [`Frame::set_ui_language`].
-    #[cfg(target_arch = "wasm32")]
-    pub(crate) ui_language: Option<String>,
+    /// The context [`Frame::set_ui_language`] sets the language of; `None` in kittest.
+    pub(crate) egui_ctx: Option<egui::Context>,
 
     /// See [`Frame::set_text_input_language`].
     #[cfg(target_arch = "wasm32")]
@@ -796,8 +795,7 @@ impl Frame {
             window: None,
             #[cfg(not(target_arch = "wasm32"))]
             activation_token: None,
-            #[cfg(target_arch = "wasm32")]
-            ui_language: None,
+            egui_ctx: None,
             #[cfg(target_arch = "wasm32")]
             text_input_language: None,
             storage: None,
@@ -823,20 +821,17 @@ impl Frame {
 
     /// Set the language of the user interface, as a BCP 47 tag (`"ar"`, `"pt-BR"`).
     ///
-    /// On the web, eframe speaks the built-in screen reader's output in this language, and uses
-    /// it as the default `lang` of the hidden text input used for IME
+    /// Same as [`egui::Context::set_language`]: it goes on the root of the AccessKit tree.
+    /// On the web, eframe also speaks the built-in screen reader's output in this language, and
+    /// uses it as the default `lang` of the hidden text input used for IME
     /// (see [`Self::set_text_input_language`]).
-    /// egui has no UI language of its own, so this is where eframe learns it.
     ///
-    /// Cheap to call every frame. Does nothing natively.
-    pub fn set_ui_language(&mut self, lang: Option<&str>) {
-        cfg_select! {
-            target_arch = "wasm32" => {
-                set_if_changed(&mut self.ui_language, lang);
-            }
-            _ => {
-                let _ = (self, lang);
-            }
+    /// Cheap to call every frame.
+    pub fn set_ui_language(&self, lang: Option<&str>) {
+        if let Some(ctx) = &self.egui_ctx
+            && ctx.options(|o| o.language.as_deref() != lang)
+        {
+            ctx.set_language(lang.map(ToOwned::to_owned));
         }
     }
 
@@ -845,7 +840,7 @@ impl Frame {
     ///
     /// On the web, eframe puts it in the `lang` attribute of the hidden text input used for IME,
     /// which browsers pass on to IMEs, virtual keyboards and spell checkers.
-    /// `None` falls back to the language from [`Self::set_ui_language`].
+    /// `None` falls back to the UI language ([`egui::Context::language`]).
     ///
     /// Cheap to call every frame. Does nothing natively.
     pub fn set_text_input_language(&mut self, lang: Option<&str>) {

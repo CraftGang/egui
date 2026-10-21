@@ -146,7 +146,7 @@ impl AppRunner {
             #[cfg(feature = "wgpu_no_default_features")]
             wgpu_render_state,
 
-            ui_language: None,
+            egui_ctx: Some(egui_ctx.clone()),
             text_input_language: None,
         };
 
@@ -395,7 +395,7 @@ impl AppRunner {
         if self.egui_ctx.options(|o| o.screen_reader) {
             super::screen_reader::speak(
                 &platform_output.events_description(),
-                self.frame.ui_language.as_deref(),
+                self.egui_ctx.language().as_deref(),
             );
         }
 
@@ -428,11 +428,12 @@ impl AppRunner {
 
         super::set_cursor_icon(self.canvas(), cursor_icon);
 
+        let ui_language = self.egui_ctx.language();
         self.text_agent.set_lang(
             self.frame
                 .text_input_language
                 .as_deref()
-                .or(self.frame.ui_language.as_deref()),
+                .or(ui_language.as_deref()),
         );
 
         if self.has_focus() {

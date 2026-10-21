@@ -1111,6 +1111,8 @@ impl State {
         };
 
         let logical_key = key_from_winit_key(winit_logical_key);
+        #[cfg(target_os = "windows")]
+        let logical_key = windows_letter_key(logical_key, windows_virtual_key(event.physical_key));
 
         // Helpful logging to enable when adding new key support
         log::trace!(
@@ -1570,6 +1572,48 @@ fn key_from_winit_key(key: &winit::keyboard::Key) -> Option<egui::Key> {
         winit::keyboard::Key::Character(str) => egui::Key::from_name(str.as_str()),
         winit::keyboard::Key::Unidentified(_) | winit::keyboard::Key::Dead(_) => None,
     }
+}
+
+/// Letter keys take the letter of their Windows virtual-key code, unless the layout
+/// types an A–Z letter there itself (Dvorak, AZERTY keep what they type).
+///
+/// On layouts without Latin letters (Russian, Greek, Arabic, Hebrew, Thai) this makes
+/// Ctrl+C match the key Windows calls C, as it does in native Windows apps.
+#[cfg(any(target_os = "windows", test))]
+fn windows_letter_key(
+    logical_key: Option<egui::Key>,
+    virtual_key: Option<u32>,
+) -> Option<egui::Key> {
+    let is_letter = |key: &egui::Key| {
+        let name = key.name();
+        name.len() == 1 && name.as_bytes()[0].is_ascii_alphabetic()
+    };
+    // VK_A to VK_Z are the ASCII codes of 'A' to 'Z'.
+    let virtual_letter = virtual_key
+        .and_then(char::from_u32)
+        .filter(char::is_ascii_uppercase)
+        .and_then(|c| egui::Key::from_name(c.encode_utf8(&mut [0; 4])));
+    logical_key
+        .filter(is_letter)
+        .or(virtual_letter)
+        .or(logical_key)
+}
+
+/// The virtual-key code the current keyboard layout gives this physical key.
+#[cfg(target_os = "windows")]
+fn windows_virtual_key(physical_key: winit::keyboard::PhysicalKey) -> Option<u32> {
+    use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
+        GetKeyboardLayout, MAPVK_VSC_TO_VK_EX, MapVirtualKeyExW,
+    };
+    use winit::platform::scancode::PhysicalKeyExtScancode as _;
+
+    let scancode = physical_key.to_scancode()?;
+    // SAFETY: neither call takes pointers. Keyboard events arrive on the window's
+    // thread, so `GetKeyboardLayout(0)` is the layout the key was typed with.
+    #[expect(unsafe_code)]
+    let virtual_key =
+        unsafe { MapVirtualKeyExW(scancode, MAPVK_VSC_TO_VK_EX, GetKeyboardLayout(0)) };
+    (virtual_key != 0).then_some(virtual_key)
 }
 
 fn key_from_named_key(named_key: winit::keyboard::NamedKey) -> Option<egui::Key> {
@@ -2674,5 +2718,50 @@ pub fn short_window_event_description(event: &winit::event::WindowEvent) -> &'st
         WindowEvent::ThemeChanged { .. } => "WindowEvent::ThemeChanged",
         WindowEvent::Occluded { .. } => "WindowEvent::Occluded",
         WindowEvent::PanGesture { .. } => "WindowEvent::PanGesture",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn windows_letter_keys() {
+        use egui::Key;
+        const VK_RETURN: u32 = 0x0D;
+        const VK_OEM_2: u32 = 0xBF;
+        const VK_OEM_3: u32 = 0xC0;
+        let vk = |c: char| Some(c as u32);
+
+        // (layout, logical key, virtual-key code, expected key)
+        let table = [
+            ("US", "c", vk('C'), Some(Key::C)),
+            ("Dvorak", "c", vk('C'), Some(Key::C)),
+            ("AZERTY", "a", vk('A'), Some(Key::A)),
+            ("German", "ö", Some(VK_OEM_3), None),
+            ("Russian", "с", vk('C'), Some(Key::C)),
+            ("Russian", "Ф", vk('A'), Some(Key::A)),
+            ("Russian", ".", Some(VK_OEM_2), Some(Key::Period)),
+            ("Russian", "1", vk('1'), Some(Key::Num1)),
+            ("Greek", "ψ", vk('C'), Some(Key::C)),
+            ("Hebrew", "ב", vk('C'), Some(Key::C)),
+            ("Arabic", "ؤ", vk('C'), Some(Key::C)),
+            ("Arabic AZERTY", "ض", vk('A'), Some(Key::A)),
+            ("Thai", "แ", vk('C'), Some(Key::C)),
+            ("Thai", "ฟ", None, None),
+        ];
+        for (layout, text, virtual_key, expected) in table {
+            let logical = key_from_winit_key(&winit::keyboard::Key::Character(text.into()));
+            assert_eq!(
+                windows_letter_key(logical, virtual_key),
+                expected,
+                "{layout} {text:?}"
+            );
+        }
+
+        let enter = key_from_winit_key(&winit::keyboard::Key::Named(
+            winit::keyboard::NamedKey::Enter,
+        ));
+        assert_eq!(windows_letter_key(enter, Some(VK_RETURN)), Some(Key::Enter));
     }
 }

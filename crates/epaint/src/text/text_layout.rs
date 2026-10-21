@@ -19,7 +19,7 @@ use crate::{
 
 use super::{
     ByteRangeExt as _, Galley, Glyph, LayoutJob, LayoutSection, PlacedRow, Row, RowVisuals,
-    VariationCoords,
+    TextDirection, VariationCoords,
     family::FamilyKey,
     font_face::{ClusterGlyph, FontFace, GlyphInfo, ShapedCluster, ShapedGlyph},
     glyph_atlas::{GlyphAllocation, OutlineGlyph, RasterGlyphAllocation},
@@ -70,6 +70,9 @@ struct Paragraph {
 
     /// In case of an empty paragraph ("\n"), use this as height.
     pub empty_paragraph_height: f32,
+
+    /// Is the base direction of this paragraph right-to-left?
+    pub rtl: bool,
 }
 
 impl Paragraph {
@@ -79,6 +82,7 @@ impl Paragraph {
             section_index_at_start,
             glyphs: vec![],
             empty_paragraph_height: 0.0,
+            rtl: false,
         }
     }
 }
@@ -109,9 +113,10 @@ pub(crate) fn layout(fonts: &mut FontsImpl, pixels_per_point: f32, job: Arc<Layo
 
     // For most of this we ignore the y coordinate:
 
-    let bidi_levels = bidi_levels(&job.text);
+    let bidi = BidiLevels::new(&job.text, job.direction);
 
     let mut paragraphs = vec![Paragraph::from_section_index(0)];
+    paragraphs[0].rtl = bidi.is_rtl_paragraph(0);
     {
         let mut shape_buffer = fonts.take_shape_buffer();
         for section_index in 0..job.sections.len() {
@@ -121,7 +126,7 @@ pub(crate) fn layout(fonts: &mut FontsImpl, pixels_per_point: f32, job: Arc<Layo
                 pixels_per_point,
                 &job,
                 section_index as u32,
-                bidi_levels.as_deref(),
+                &bidi,
                 &mut paragraphs,
             );
         }
@@ -144,31 +149,40 @@ pub(crate) fn layout(fonts: &mut FontsImpl, pixels_per_point: f32, job: Arc<Layo
 
     // Up to here every glyph sits at its logical position. Now place
     // right-to-left text where a reader expects it:
-    if bidi_levels.is_some() {
+    if bidi.levels.is_some() {
         for placed_row in &mut rows {
-            if placed_row.row.glyphs.iter().any(Glyph::is_rtl) {
-                reorder_row_visually(point_scale, Arc::make_mut(&mut placed_row.row));
+            let row = Arc::make_mut(&mut placed_row.row);
+            reset_whitespace_levels(row);
+            if row.glyphs.iter().any(Glyph::is_rtl) {
+                reorder_row_visually(point_scale, row);
             }
         }
     }
 
     let justify = job.justify && job.wrap.max_width.is_finite();
 
-    if justify || job.halign != Align::LEFT {
-        let num_rows = rows.len();
-        for (i, placed_row) in rows.iter_mut().enumerate() {
-            let is_last_row = i + 1 == num_rows;
-            let justify_row = justify && !placed_row.ends_with_newline && !is_last_row;
+    let num_rows = rows.len();
+    for (i, placed_row) in rows.iter_mut().enumerate() {
+        // Aligned around x = 0 for now, see `align_rtl_rows_to_start`:
+        let halign = if starts_on_the_right(&job, &placed_row.row) {
+            Align::RIGHT
+        } else {
+            job.halign
+        };
+        let is_last_row = i + 1 == num_rows;
+        let justify_row = justify && !placed_row.ends_with_newline && !is_last_row;
+        if justify || halign != Align::LEFT {
             halign_and_justify_row(
                 point_scale,
                 placed_row,
-                job.halign,
+                halign,
                 job.wrap.max_width,
                 justify_row,
                 job.keep_trailing_whitespace,
             );
         }
     }
+    align_rtl_rows_to_start(&job, &mut rows, pixels_per_point);
 
     // Calculate the Y positions and tessellate the text:
     galley_from_rows(point_scale, job, rows, elided, intrinsic_size)
@@ -283,6 +297,7 @@ fn layout_shaped_run(
         }
         ctx.is_first_glyph_in_section = false;
 
+        let first_glyph = paragraph.glyphs.len();
         let as_one_bitmap = if char_count < glyph_range.len() {
             emit_cluster_bitmap(fonts, &shaped, glyph_range.clone(), ctx, paragraph)
         } else {
@@ -290,6 +305,17 @@ fn layout_shaped_run(
         };
         let emitted = as_one_bitmap
             .unwrap_or_else(|| emit_cluster_glyphs(fonts, &shaped, glyph_range, ctx, paragraph));
+
+        // Every glyph of a cluster was emitted for the cluster's first char.
+        // Give each its own char, in logical order, so the row's chars are the text.
+        if let Some(cluster_text) = run_text.get(byte_range.clone()) {
+            for (glyph, chr) in paragraph.glyphs[first_glyph..]
+                .iter_mut()
+                .zip(cluster_text.chars())
+            {
+                glyph.chr = chr;
+            }
+        }
 
         emit_continuation_glyphs(ctx, paragraph, run_text, byte_range, emitted, face_metrics);
     }
@@ -670,7 +696,7 @@ fn layout_section(
     pixels_per_point: f32,
     job: &LayoutJob,
     section_index: u32,
-    bidi_levels: Option<&[u8]>,
+    bidi: &BidiLevels,
     out_paragraphs: &mut Vec<Paragraph>,
 ) -> harfrust::UnicodeBuffer {
     let section = &job.sections[section_index as usize];
@@ -714,15 +740,18 @@ fn layout_section(
 
     // Process each paragraph segment (split on newlines — the shaper can't handle them).
     for (seg_idx, segment) in SplitOrWhole::new(section_text, job.break_on_newline).enumerate() {
-        let segment_levels =
-            bidi_levels.map(|levels| &levels[segment_start..segment_start + segment.len()]);
-        segment_start += segment.len() + 1; // skip the `\n` we split on
+        let segment_levels = bidi
+            .levels
+            .as_deref()
+            .map(|levels| &levels[segment_start..segment_start + segment.len()]);
 
         if 0 < seg_idx {
             paragraph = out_paragraphs.push_mut(Paragraph::from_section_index(section_index));
             paragraph.empty_paragraph_height = line_height;
+            paragraph.rtl = bidi.is_rtl_paragraph(segment_start);
             ctx.is_first_glyph_in_section = true;
         }
+        segment_start += segment.len() + 1; // skip the `\n` we split on
 
         if segment.is_empty() {
             continue;
@@ -870,6 +899,8 @@ fn rows_from_paragraphs(
                 row: Arc::new(Row {
                     section_index_at_start: paragraph.section_index_at_start,
                     glyphs: vec![],
+                    rtl_paragraph: paragraph.rtl,
+                    visual_order: Vec::new(),
                     visuals: Default::default(),
                     size: vec2(0.0, paragraph.empty_paragraph_height),
                 }),
@@ -887,6 +918,8 @@ fn rows_from_paragraphs(
                     row: Arc::new(Row {
                         section_index_at_start: paragraph.section_index_at_start,
                         glyphs: paragraph.glyphs,
+                        rtl_paragraph: paragraph.rtl,
+                        visual_order: Vec::new(),
                         visuals: Default::default(),
                         size: vec2(paragraph_width, 0.0),
                     }),
@@ -939,6 +972,8 @@ fn line_break(
                     row: Arc::new(Row {
                         section_index_at_start: paragraph.section_index_at_start,
                         glyphs: vec![],
+                        rtl_paragraph: paragraph.rtl,
+                        visual_order: Vec::new(),
                         visuals: Default::default(),
                         size: Vec2::ZERO,
                     }),
@@ -965,6 +1000,8 @@ fn line_break(
                     row: Arc::new(Row {
                         section_index_at_start,
                         glyphs,
+                        rtl_paragraph: paragraph.rtl,
+                        visual_order: Vec::new(),
                         visuals: Default::default(),
                         size: vec2(paragraph_max_x, 0.0),
                     }),
@@ -1008,6 +1045,8 @@ fn line_break(
                 row: Arc::new(Row {
                     section_index_at_start,
                     glyphs,
+                    rtl_paragraph: paragraph.rtl,
+                    visual_order: Vec::new(),
                     visuals: Default::default(),
                     size: vec2(paragraph_max_x - paragraph_min_x, 0.0),
                 }),
@@ -1077,7 +1116,9 @@ fn replace_last_glyph_with_overflow_character(
         } else {
             0.0 // TODO(emilk): heed paragraph leading_space 😬
         };
-        let bidi_level = row.glyphs.last().map_or(0, |glyph| glyph.bidi_level);
+        // At the paragraph level the character goes to the visual end of the row
+        // (the left end of a right-to-left row), whatever direction the text before it has:
+        let bidi_level = u8::from(row.rtl_paragraph);
 
         let advance_width_px = match &raster {
             Some(raster) => raster.advance_px,
@@ -1186,13 +1227,22 @@ fn halign_and_justify_row(
 
     // Glyphs are indexed in logical order but placed in visual order
     // (see `reorder_row_visually`), so measure and shift them by x:
-    let order = visual_order(row);
-    let kept = |i: &usize| glyph_range.0 <= *i && *i < glyph_range.1;
-    let first_kept = order.iter().position(kept).unwrap_or(0);
-    let last_kept = order.iter().rposition(kept).unwrap_or(0);
+    let Row {
+        glyphs,
+        visual_order,
+        ..
+    } = &mut *row;
+    let num_glyphs = glyphs.len();
+    let order = || visual_indices(visual_order, num_glyphs);
+    let kept = |i: usize| glyph_range.0 <= i && i < glyph_range.1;
+    let first_kept = order().position(kept).unwrap_or(0);
+    let last_kept = order().rev().find(|&i| kept(i)).unwrap_or(0);
 
-    let original_min_x = row.glyphs[order[first_kept]].logical_rect().min.x;
-    let original_max_x = row.glyphs[order[last_kept]].logical_rect().max.x;
+    let original_min_x = glyphs[order().nth(first_kept).unwrap_or(0)]
+        .logical_rect()
+        .min
+        .x;
+    let original_max_x = glyphs[last_kept].logical_rect().max.x;
     let original_width = original_max_x - original_min_x;
 
     let target_width = if justify && num_glyphs_in_range > 1 {
@@ -1207,7 +1257,7 @@ fn halign_and_justify_row(
         Align::RIGHT => (-target_width, 0.0),
     };
 
-    let num_spaces_in_range = row.glyphs[glyph_range.0..glyph_range.1]
+    let num_spaces_in_range = glyphs[glyph_range.0..glyph_range.1]
         .iter()
         .filter(|glyph| glyph.chr.is_whitespace())
         .count();
@@ -1235,8 +1285,8 @@ fn halign_and_justify_row(
     placed_row.pos.x = point_scale.round_to_pixel(target_min_x);
     let mut translate_x = -original_min_x - extra_x_per_glyph * first_kept as f32;
 
-    for &i in &order {
-        let glyph = &mut row.glyphs[i];
+    for i in order() {
+        let glyph = &mut glyphs[i];
         glyph.pos.x += translate_x;
         glyph.pos.x = point_scale.round_to_pixel(glyph.pos.x);
         translate_x += extra_x_per_glyph;
@@ -1247,6 +1297,50 @@ fn halign_and_justify_row(
 
     // Note we ignore the leading/trailing whitespace here!
     row.size.x = target_max_x - target_min_x;
+}
+
+/// Is `row` aligned to the right because its start is there?
+///
+/// See [`LayoutJob::halign_min_is_start`].
+fn starts_on_the_right(job: &LayoutJob, row: &Row) -> bool {
+    job.halign == Align::Min
+        && job.halign_min_is_start
+        && row.rtl_paragraph
+        && !row.glyphs.is_empty()
+}
+
+/// Puts each row that [`starts_on_the_right`] flush with the right edge of the widest row.
+///
+/// Such a row has been aligned as `Align::RIGHT`, with its size in `row.size.x`;
+/// the other rows stay where they are. Returns `true` if any row moved.
+pub(crate) fn align_rtl_rows_to_start(
+    job: &LayoutJob,
+    rows: &mut [PlacedRow],
+    pixels_per_point: f32,
+) -> bool {
+    if !rows
+        .iter()
+        .any(|placed_row| starts_on_the_right(job, &placed_row.row))
+    {
+        return false;
+    }
+    let width = rows
+        .iter()
+        .map(|placed_row| {
+            if starts_on_the_right(job, &placed_row.row) {
+                placed_row.size.x
+            } else {
+                placed_row.pos.x + placed_row.size.x
+            }
+        })
+        .fold(0.0, f32::max);
+    let point_scale = PointScale::new(pixels_per_point);
+    for placed_row in rows {
+        if starts_on_the_right(job, &placed_row.row) {
+            placed_row.pos.x = point_scale.round_to_pixel(width - placed_row.size.x);
+        }
+    }
+    true
 }
 
 /// Calculate the Y positions and tessellate the text.
@@ -1429,7 +1523,7 @@ fn add_row_backgrounds(point_scale: PointScale, job: &LayoutJob, row: &Row, mesh
     let mut run_start = None;
     let mut last_rect = Rect::NAN;
 
-    for i in visual_order(row) {
+    for i in row.visual_order() {
         let glyph = &row.glyphs[i];
         let format = &job.sections[glyph.section_index as usize].format;
         let color = format.background;
@@ -1535,7 +1629,7 @@ fn add_row_hline(
     let mut line_start = None;
     let mut last_right_x = f32::NAN;
 
-    for i in visual_order(row) {
+    for i in row.visual_order() {
         let glyph = &row.glyphs[i];
         let (stroke, mut y) = stroke_and_y(glyph);
         stroke.round_center_to_pixel(point_scale.pixels_per_point, &mut y);
@@ -1752,19 +1846,94 @@ fn segment_into_runs(
     }
 }
 
-/// The resolved bidi embedding level (UAX #9) of every byte of `text`,
-/// or `None` when the text has no right-to-left character, which keeps
-/// the common case free of any bidi work.
-///
-/// Paragraph direction is taken from the first strong character (rules P2/P3),
-/// the same as `dir="auto"` in a browser.
-fn bidi_levels(text: &str) -> Option<Vec<u8>> {
-    if text.is_ascii() {
-        return None;
+/// The result of the bidi algorithm (UAX #9) on the text of a job, up to rule I2.
+struct BidiLevels {
+    /// The resolved embedding level of every byte of the text, or `None`
+    /// when the text has no right-to-left character and every paragraph is
+    /// left-to-right, which keeps the common case free of any bidi work.
+    levels: Option<Vec<u8>>,
+
+    /// The byte ranges of the right-to-left paragraphs, in order.
+    rtl_paragraphs: Vec<Range<usize>>,
+
+    direction: TextDirection,
+}
+
+impl BidiLevels {
+    fn new(text: &str, direction: TextDirection) -> Self {
+        let mut bidi = Self {
+            levels: None,
+            rtl_paragraphs: Vec::new(),
+            direction,
+        };
+        let paragraph_level = match direction {
+            TextDirection::Auto | TextDirection::LeftToRight if text.is_ascii() => return bidi,
+            TextDirection::Auto => None,
+            TextDirection::LeftToRight => Some(unicode_bidi::Level::ltr()),
+            TextDirection::RightToLeft => Some(unicode_bidi::Level::rtl()),
+        };
+        let info = unicode_bidi::BidiInfo::new(text, paragraph_level);
+        bidi.rtl_paragraphs = info
+            .paragraphs
+            .iter()
+            .filter(|paragraph| paragraph.level.is_rtl())
+            .map(|paragraph| paragraph.range.clone())
+            .collect();
+        // A right-to-left paragraph needs its levels even when they are all even,
+        // e.g. for trailing whitespace (rule L1).
+        if info.has_rtl() || !bidi.rtl_paragraphs.is_empty() {
+            bidi.levels = Some(info.levels.iter().map(|level| level.number()).collect());
+        }
+        bidi
     }
-    let info = unicode_bidi::BidiInfo::new(text, None);
-    info.has_rtl()
-        .then(|| info.levels.iter().map(|level| level.number()).collect())
+
+    /// Is the paragraph that contains the byte at `byte_offset` right-to-left?
+    ///
+    /// With [`TextDirection::Auto`], the empty paragraph after a final `\n` is left-to-right.
+    fn is_rtl_paragraph(&self, byte_offset: usize) -> bool {
+        match self.direction {
+            TextDirection::LeftToRight => false,
+            TextDirection::RightToLeft => true,
+            TextDirection::Auto => {
+                let i = self
+                    .rtl_paragraphs
+                    .partition_point(|range| range.end <= byte_offset);
+                self.rtl_paragraphs
+                    .get(i)
+                    .is_some_and(|range| range.contains(&byte_offset))
+            }
+        }
+    }
+}
+
+/// UAX #9 rule L1: segment separators (tab), paragraph separators, and any sequence
+/// of whitespace before one of them or at the end of the row take the paragraph level.
+///
+/// So the spaces where a right-to-left row wraps go to its left end,
+/// not next to the last word wherever that is on the row.
+fn reset_whitespace_levels(row: &mut Row) {
+    use unicode_bidi::BidiClass::{B, BN, FSI, LRE, LRI, LRO, PDF, PDI, RLE, RLI, RLO, S, WS};
+
+    let paragraph_level = u8::from(row.rtl_paragraph);
+    // Walking backwards: is everything after this glyph, up to a separator
+    // or the end of the row, whitespace?
+    let mut in_trailing_whitespace = true;
+    for glyph in row.glyphs.iter_mut().rev() {
+        match unicode_bidi::bidi_class(glyph.chr) {
+            B | S => {
+                glyph.bidi_level = paragraph_level;
+                in_trailing_whitespace = true;
+            }
+            // Whitespace, isolate formatting characters, and the characters
+            // that rule X9 removes:
+            WS | FSI | LRI | RLI | PDI | LRE | RLE | LRO | RLO | PDF | BN => {
+                if in_trailing_whitespace {
+                    glyph.bidi_level = paragraph_level;
+                }
+            }
+            _ => in_trailing_whitespace = false,
+        }
+    }
 }
 
 /// The clusters of a shaped buffer, as ranges of glyph indices, in _logical_ order.
@@ -1819,18 +1988,22 @@ impl Iterator for LogicalClusters<'_> {
     }
 }
 
-/// The glyph indices of `row` sorted by where the glyphs are placed.
-///
-/// The identity for left-to-right rows.
-fn visual_order(row: &Row) -> Vec<usize> {
-    let mut order: Vec<usize> = (0..row.glyphs.len()).collect();
-    if row.glyphs.iter().any(Glyph::is_rtl) {
-        order.sort_by(|&a, &b| row.glyphs[a].pos.x.total_cmp(&row.glyphs[b].pos.x));
-    }
-    order
+#[cfg(test)]
+std::thread_local! {
+    /// Counts the steps [`reorder_row_visually`] takes, for a test that keeps it linear.
+    static REORDER_STEPS: core::cell::Cell<usize> = const { core::cell::Cell::new(0) };
 }
 
-/// Place the glyphs of a row in visual order (UAX #9 rule L2) by rewriting their x.
+#[inline]
+fn count_reorder_steps(steps: usize) {
+    #[cfg(test)]
+    REORDER_STEPS.with(|count| count.set(count.get() + steps));
+    #[cfg(not(test))]
+    let _ = steps;
+}
+
+/// Place the glyphs of a row in visual order (UAX #9 rule L2) by rewriting their x,
+/// and store that order in [`Row::visual_order`].
 ///
 /// On entry `row.glyphs` is in logical order with increasing x, as
 /// [`layout_shaped_run`] left it. It stays in logical order, so a glyph's
@@ -1839,6 +2012,10 @@ fn visual_order(row: &Row) -> Vec<usize> {
 /// A block is one advancing glyph and the zero-width glyphs after it
 /// (combining marks, the continuation glyphs of a cluster). Blocks move as
 /// units so a mark stays over its base.
+///
+/// Takes time linear in the number of glyphs: each pass of L2 reverses level runs
+/// (maximal sequences of blocks at one level), not single blocks, and there are
+/// at most 126 levels.
 fn reorder_row_visually(point_scale: PointScale, row: &mut Row) {
     let glyphs = &mut row.glyphs;
     if glyphs.len() < 2 {
@@ -1852,10 +2029,7 @@ fn reorder_row_visually(point_scale: PointScale, row: &mut Row) {
             _ => blocks.push(i..i + 1),
         }
     }
-    let levels: Vec<u8> = blocks
-        .iter()
-        .map(|block| glyphs[block.start].bidi_level)
-        .collect();
+    count_reorder_steps(glyphs.len());
     let origins: Vec<f32> = blocks
         .iter()
         .map(|block| glyphs[block.start].pos.x)
@@ -1877,35 +2051,80 @@ fn reorder_row_visually(point_scale: PointScale, row: &mut Row) {
         })
         .collect();
 
+    // Level runs, as ranges of block indices:
+    let mut runs: Vec<Range<usize>> = Vec::new();
+    let mut run_levels: Vec<u8> = Vec::new();
+    for (b, block) in blocks.iter().enumerate() {
+        let level = glyphs[block.start].bidi_level;
+        match runs.last_mut() {
+            Some(last) if run_levels.last() == Some(&level) => last.end = b + 1,
+            _ => {
+                runs.push(b..b + 1);
+                run_levels.push(level);
+            }
+        }
+    }
+    count_reorder_steps(blocks.len());
+
     // L2: from the highest level down to the lowest odd level,
-    // reverse every maximal sequence of blocks at that level or higher.
-    let Some(lowest_odd) = levels.iter().copied().filter(|l| l % 2 == 1).min() else {
+    // reverse every maximal sequence of runs at that level or higher.
+    let Some(lowest_odd) = run_levels.iter().copied().filter(|l| l % 2 == 1).min() else {
         return;
     };
-    let highest = levels.iter().copied().max().unwrap_or(0);
-    let mut order: Vec<usize> = (0..blocks.len()).collect();
+    let highest = run_levels.iter().copied().max().unwrap_or(0);
+    let mut order: Vec<usize> = (0..runs.len()).collect();
     for level in (lowest_odd..=highest).rev() {
         let mut i = 0;
         while i < order.len() {
-            if levels[order[i]] < level {
+            if run_levels[order[i]] < level {
                 i += 1;
                 continue;
             }
             let start = i;
-            while i < order.len() && level <= levels[order[i]] {
+            while i < order.len() && level <= run_levels[order[i]] {
                 i += 1;
             }
             order[start..i].reverse();
         }
+        count_reorder_steps(order.len());
     }
 
+    // Each pass at or below a run's level reversed it as a whole, so its blocks
+    // are in reverse order if that happened an odd number of times:
+    let mut visual_order = Vec::with_capacity(glyphs.len());
     let mut pen = origins[0];
-    for &b in &order {
-        for glyph in &mut glyphs[blocks[b].clone()] {
-            glyph.pos.x = point_scale.round_to_pixel(pen + (glyph.pos.x - origins[b]));
+    for &r in &order {
+        let reversed =
+            lowest_odd <= run_levels[r] && (run_levels[r] - lowest_odd).is_multiple_of(2);
+        let run = runs[r].clone();
+        let mut place = |b: usize| {
+            for i in blocks[b].clone() {
+                let glyph = &mut glyphs[i];
+                glyph.pos.x = point_scale.round_to_pixel(pen + (glyph.pos.x - origins[b]));
+                visual_order.push(i as u32);
+            }
+            pen += widths[b];
+        };
+        if reversed {
+            run.rev().for_each(&mut place);
+        } else {
+            run.for_each(&mut place);
         }
-        pen += widths[b];
     }
+    count_reorder_steps(glyphs.len());
+    row.visual_order = visual_order;
+}
+
+/// The indices of `len` glyphs from left to right, given a [`Row::visual_order`].
+pub(crate) fn visual_indices(
+    visual_order: &[u32],
+    len: usize,
+) -> impl DoubleEndedIterator<Item = usize> + Clone + '_ {
+    // Rows that need no reordering have no `visual_order`; a row whose glyphs were
+    // changed after layout gets the logical order rather than a panic.
+    let identity = if visual_order.len() == len { 0 } else { len };
+    let reordered = if identity == 0 { visual_order } else { &[] };
+    (0..identity).chain(reordered.iter().map(|&i| i as usize))
 }
 
 /// Shape a text run and return the raw [`harfrust::GlyphBuffer`].
@@ -3226,6 +3445,261 @@ mod tests {
         }
     }
 
+    fn layout_with_direction(
+        fonts: &mut FontsImpl,
+        text: &str,
+        direction: TextDirection,
+    ) -> Galley {
+        let mut job = LayoutJob::simple(
+            text.to_owned(),
+            FontId::proportional(14.0),
+            Color32::WHITE,
+            f32::INFINITY,
+        );
+        job.direction = direction;
+        layout(fonts, 1.0, Arc::new(job))
+    }
+
+    #[test]
+    fn paragraph_direction_is_auto_or_forced() {
+        let mut fonts = test_fonts();
+
+        // Each paragraph takes the direction of its first strong character:
+        let galley =
+            layout_with_direction(&mut fonts, "abc אבג\nאבג abc\n123", TextDirection::Auto);
+        let rtl: Vec<bool> = galley.rows.iter().map(|row| row.rtl_paragraph).collect();
+        assert_eq!(rtl, [false, true, false]);
+        assert_visual_order(&galley.rows[0].row, &[0, 1, 2, 6, 5, 4]);
+        assert_visual_order(&galley.rows[1].row, &[4, 5, 6, 2, 1, 0]);
+
+        // A forced direction overrides the first strong character:
+        let galley = layout_with_direction(&mut fonts, "abc אבג", TextDirection::RightToLeft);
+        assert!(galley.rows[0].rtl_paragraph);
+        assert_visual_order(&galley.rows[0].row, &[6, 5, 4, 0, 1, 2]);
+
+        let galley = layout_with_direction(&mut fonts, "אבג abc", TextDirection::LeftToRight);
+        assert!(!galley.rows[0].rtl_paragraph);
+        assert_visual_order(&galley.rows[0].row, &[2, 1, 0, 4, 5, 6]);
+
+        // Text without a right-to-left character can still be in a right-to-left paragraph:
+        let galley = layout_with_direction(&mut fonts, "abc", TextDirection::RightToLeft);
+        assert!(galley.rows[0].rtl_paragraph);
+        assert!(
+            galley.rows[0]
+                .glyphs
+                .iter()
+                .all(|glyph| glyph.bidi_level == 2)
+        );
+        assert_visual_order(&galley.rows[0].row, &[0, 1, 2]);
+    }
+
+    /// `Fonts` lays out each paragraph of a multi-paragraph job on its own;
+    /// every one of them must keep the job's direction.
+    #[test]
+    fn paragraph_direction_survives_the_paragraph_cache() {
+        let mut fonts = Fonts::new(TextOptions::default(), FontDefinitions::default());
+        let mut job = LayoutJob::simple(
+            "abc\ndef\n".to_owned(),
+            FontId::proportional(14.0),
+            Color32::WHITE,
+            f32::INFINITY,
+        );
+        job.direction = TextDirection::RightToLeft;
+        let galley = fonts.with_pixels_per_point(1.0).layout_job(job);
+        assert_eq!(galley.rows.len(), 3);
+        assert!(galley.rows.iter().all(|row| row.rtl_paragraph));
+    }
+
+    /// The left and right edge of the visible glyphs of a row, in galley coordinates.
+    fn visible_x_range(placed_row: &PlacedRow) -> Rangef {
+        let visible = placed_row
+            .glyphs
+            .iter()
+            .filter(|glyph| !glyph.chr.is_whitespace());
+        let min = visible
+            .clone()
+            .map(|g| g.pos.x)
+            .fold(f32::INFINITY, f32::min);
+        let max = visible.map(Glyph::max_x).fold(f32::NEG_INFINITY, f32::max);
+        Rangef::new(placed_row.pos.x + min, placed_row.pos.x + max)
+    }
+
+    #[test]
+    fn rtl_paragraphs_start_on_the_right() {
+        let text = "abcdefghij\nאב גד\nאב";
+        let job = |halign: Align, halign_min_is_start: bool| {
+            let mut job = LayoutJob::simple(
+                text.to_owned(),
+                FontId::proportional(14.0),
+                Color32::WHITE,
+                f32::INFINITY,
+            );
+            job.halign = halign;
+            job.halign_min_is_start = halign_min_is_start;
+            job
+        };
+        let mut fonts = test_fonts();
+        let close = |a: f32, b: f32| (a - b).abs() <= 0.5;
+
+        // The start of a right-to-left paragraph is on the right,
+        // flush with the widest row; the galley still starts at x = 0:
+        let galley = layout(&mut fonts, 1.0, Arc::new(job(Align::LEFT, true)));
+        let ranges: Vec<Rangef> = galley.rows.iter().map(visible_x_range).collect();
+        assert_eq!(galley.rect.min.x, 0.0);
+        assert!(close(ranges[0].min, 0.0), "{ranges:?}");
+        for range in &ranges[1..] {
+            assert!(close(range.max, ranges[0].max), "{ranges:?}");
+            assert!(0.0 < range.min, "{ranges:?}");
+        }
+
+        // `Fonts` lays out each paragraph on its own, then joins them:
+        let joined = Fonts::new(TextOptions::default(), FontDefinitions::default())
+            .with_pixels_per_point(1.0)
+            .layout_job(job(Align::LEFT, true));
+        let joined_ranges: Vec<Rangef> = joined.rows.iter().map(visible_x_range).collect();
+        assert_eq!(joined_ranges, ranges);
+        assert_eq!(joined.rect.min.x, 0.0);
+
+        // An explicit left alignment:
+        let galley = layout(&mut fonts, 1.0, Arc::new(job(Align::LEFT, false)));
+        for placed_row in &galley.rows {
+            assert!(close(visible_x_range(placed_row).min, 0.0));
+        }
+
+        // Right and center alignment do not depend on the direction:
+        let galley = layout(&mut fonts, 1.0, Arc::new(job(Align::RIGHT, true)));
+        for placed_row in &galley.rows {
+            assert!(close(visible_x_range(placed_row).max, 0.0));
+        }
+        let galley = layout(&mut fonts, 1.0, Arc::new(job(Align::Center, true)));
+        for placed_row in &galley.rows {
+            let range = visible_x_range(placed_row);
+            assert!((range.min + range.max).abs() <= 1.0, "{range:?}");
+        }
+    }
+
+    #[test]
+    fn elision_is_at_the_visual_end_of_the_row() {
+        let mut fonts = test_fonts();
+        for (text, rtl) in [
+            ("אבגד הוזח טיכל מנסע", true),
+            ("שלום hello world again", true),
+            ("ab אבגד הוזח טיכל מנסע", false),
+        ] {
+            let full_width = layout_simple(&mut fonts, text).size().x;
+            let mut job = LayoutJob::simple_singleline(
+                text.to_owned(),
+                FontId::proportional(14.0),
+                Color32::WHITE,
+            );
+            job.wrap = TextWrapping::truncate_at_width(full_width / 2.0);
+            let galley = layout(&mut fonts, 1.0, Arc::new(job));
+            assert!(galley.elided);
+            let row = &galley.rows[0].row;
+            assert_eq!(row.rtl_paragraph, rtl);
+
+            // The logically first text is kept, followed by the overflow character:
+            let kept = row.text();
+            assert!(kept.ends_with('…'), "{kept:?}");
+            assert!(text.starts_with(kept.trim_end_matches('…')), "{kept:?}");
+
+            let ellipsis = row.glyphs.last().unwrap();
+            let others = &row.glyphs[..row.glyphs.len() - 1];
+            // Without fonts the overflow character has no width, and goes along with
+            // the glyph before it:
+            let visible = 0.0 < ellipsis.advance_width;
+            assert_eq!(visible, cfg!(feature = "default_fonts"));
+            if visible {
+                let at_visual_end = |g: &Glyph| {
+                    if rtl {
+                        ellipsis.max_x() <= g.pos.x
+                    } else {
+                        g.max_x() <= ellipsis.pos.x
+                    }
+                };
+                assert!(others.iter().all(at_visual_end), "{kept:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn whitespace_at_the_end_of_a_row_takes_the_paragraph_level() {
+        let mut fonts = test_fonts();
+        let mut layout_left = |text: &str, max_width: f32| {
+            let mut job = LayoutJob::simple(
+                text.to_owned(),
+                FontId::proportional(14.0),
+                Color32::WHITE,
+                max_width,
+            );
+            job.halign_min_is_start = false;
+            layout(&mut fonts, 1.0, Arc::new(job))
+        };
+        for (first_row, rest, rtl) in [("אבג abc ", "def", true), ("abc אבג ", "דהו", false)]
+        {
+            let width = layout_left(first_row, f32::INFINITY).size().x;
+            let galley = layout_left(&format!("{first_row}{rest}"), width + 1.0);
+            assert_eq!(galley.rows.len(), 2);
+            let row = &galley.rows[0].row;
+            assert_eq!(row.text(), first_row);
+            assert_eq!(row.rtl_paragraph, rtl);
+
+            // Inside the paragraph this space is between two words of the other direction,
+            // but where the row wraps it goes to the visual end of the row:
+            let space = row.glyphs.last().unwrap();
+            assert_eq!(space.bidi_level, u8::from(rtl));
+            let others = &row.glyphs[..row.glyphs.len() - 1];
+            if rtl {
+                assert!(others.iter().all(|g| space.pos.x < g.pos.x));
+            } else {
+                assert!(others.iter().all(|g| g.pos.x < space.pos.x));
+            }
+        }
+
+        // A tab is a segment separator and also takes the paragraph level:
+        let galley = layout_with_direction(&mut fonts, "abc \tdef", TextDirection::RightToLeft);
+        let levels: Vec<u8> = galley.rows[0].glyphs.iter().map(|g| g.bidi_level).collect();
+        assert_eq!(levels, [2, 2, 2, 1, 1, 2, 2, 2]);
+    }
+
+    #[test]
+    fn reordering_a_long_mixed_paragraph_takes_linear_steps() {
+        let mut fonts = test_fonts();
+        let text: String = iter::repeat_n("abc אבג 123 (דה) x: ", 500).collect();
+        let num_chars = text.chars().count();
+        assert!(10_000 <= num_chars);
+
+        for max_width in [f32::INFINITY, 300.0] {
+            REORDER_STEPS.with(|steps| steps.set(0));
+            let job = LayoutJob::simple(
+                text.clone(),
+                FontId::proportional(14.0),
+                Color32::WHITE,
+                max_width,
+            );
+            let galley = layout(&mut fonts, 1.0, Arc::new(job));
+            let steps = REORDER_STEPS.with(core::cell::Cell::get);
+            assert!(
+                0 < steps && steps <= 6 * num_chars,
+                "{steps} steps for {num_chars} chars"
+            );
+
+            // The cached order is a permutation that matches where the glyphs are:
+            for placed_row in &galley.rows {
+                let row = &placed_row.row;
+                let mut order: Vec<usize> = row.visual_order().collect();
+                let xs: Vec<f32> = order
+                    .iter()
+                    .filter(|&&i| 0.0 < row.glyphs[i].advance_width)
+                    .map(|&i| row.glyphs[i].pos.x)
+                    .collect();
+                assert!(xs.is_sorted(), "{:?}", row.text());
+                order.sort_unstable();
+                assert!(order.into_iter().eq(0..row.glyphs.len()));
+            }
+        }
+    }
+
     /// Asserts that the glyphs at these char indices are placed left to right.
     #[track_caller]
     fn assert_visual_order(row: &Row, left_to_right: &[usize]) {
@@ -3412,6 +3886,75 @@ mod tests {
             alef.pos.x,
             alef.max_x()
         );
+    }
+
+    /// A base and a mark that the font draws as two glyphs of one cluster
+    /// each keep their own char.
+    #[test]
+    #[cfg(feature = "default_fonts")]
+    fn multi_glyph_cluster_keeps_its_chars() {
+        // Hack has the combining acute, and no precomposed form of either cluster.
+        let mut fonts = FontsImpl::new(TextOptions::default(), hack_only());
+        for text in ["q\u{301}x", "\u{5D0}\u{301}\u{5D1}"] {
+            let galley = layout_simple(&mut fonts, text);
+            assert_eq!(galley.rows[0].row.text(), text);
+        }
+    }
+
+    /// Left and Right step over whole grapheme clusters.
+    #[test]
+    fn cursor_moves_by_grapheme_cluster() {
+        let mut fonts = test_fonts();
+        let text = "e\u{301}👨\u{200D}👩\u{200D}👧🇸🇪1\u{FE0F}\u{20E3}क्षกี่\u{627}\u{651}";
+        let boundaries = [0, 2, 7, 9, 12, 15, 18, 20];
+        let galley = layout_simple(&mut fonts, text);
+
+        let mut cursor = galley.begin();
+        let mut right = vec![cursor.index.0];
+        while cursor != galley.end() {
+            cursor = galley.cursor_right_one_character(&cursor);
+            right.push(cursor.index.0);
+        }
+        assert_eq!(right, boundaries);
+
+        let mut left = vec![cursor.index.0];
+        while cursor != galley.begin() {
+            cursor = galley.cursor_left_one_character(&cursor);
+            left.push(cursor.index.0);
+        }
+        left.reverse();
+        assert_eq!(left, boundaries);
+    }
+
+    /// Hit testing never puts the cursor inside a grapheme cluster,
+    /// in left-to-right and in right-to-left rows.
+    #[test]
+    fn hit_testing_lands_on_cluster_boundaries() {
+        let mut font_sets = vec![test_fonts()];
+        #[cfg(feature = "default_fonts")]
+        font_sets.push(FontsImpl::new(TextOptions::default(), hack_only()));
+
+        let texts = [
+            "\u{628}\u{651}\u{627}\u{64B} \u{5D0}\u{301}\u{5D1}\u{302}\u{303}", // right-to-left
+            "\u{5D0}\u{301} q\u{301}e\u{301} 🇸🇪 \u{5D1}\u{302}",                // mixed directions
+            "q\u{301}e\u{301}🇸🇪1\u{FE0F}\u{20E3}कि",                            // left-to-right
+        ];
+        for fonts in &mut font_sets {
+            for text in texts {
+                let galley = layout_simple(fonts, text);
+                let row = &galley.rows[0];
+                let mut x = row.rect().left() - 5.0;
+                while x < row.rect().right() + 5.0 {
+                    let cursor = galley.cursor_from_pos(vec2(x, row.rect().center().y));
+                    assert!(
+                        grapheme::cluster_around(text, cursor.index).is_none(),
+                        "{text:?}: the cursor at x = {x} is at {}, inside a cluster",
+                        cursor.index
+                    );
+                    x += 0.25;
+                }
+            }
+        }
     }
 
     /// Glyph and row positions of left-to-right text: no wrapping, centered and justified.

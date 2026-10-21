@@ -120,6 +120,14 @@ impl Default for RawInput {
 }
 
 impl RawInput {
+    /// Does the active keyboard layout type Latin letters? `None` means "don't know".
+    ///
+    /// Returns the field of the same name.
+    #[inline]
+    pub fn keyboard_layout_is_latin(&self) -> Option<bool> {
+        self.keyboard_layout_is_latin
+    }
+
     /// Info about the active viewport
     #[inline]
     pub fn viewport(&self) -> &ViewportInfo {

@@ -496,6 +496,12 @@ impl InputState {
         }
     }
 
+    /// Does the active keyboard layout type Latin letters? See [`RawInput::keyboard_layout_is_latin()`].
+    #[inline]
+    pub fn keyboard_layout_is_latin(&self) -> Option<bool> {
+        self.raw.keyboard_layout_is_latin
+    }
+
     /// Info about the active viewport
     #[inline]
     pub fn viewport(&self) -> &ViewportInfo {

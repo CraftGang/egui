@@ -173,10 +173,10 @@ wgpu = { version = "30.0", default-features = false, features = ["std"] }
 windows-sys = "0.61.2"
 winit = { version = "0.30.13", default-features = false }
 
-# The craft suite's shared winit (storytold/winit patches: IME, Latin letters for shortcuts).
-# Moves to storytold/winit once the patches land there.
+# The craft suite's shared winit: storytold/winit `craft/0.30.13` (W1–W15) plus the language-support
+# patches (W17–W27: IME, Latin letters for shortcuts). Moves to storytold/winit once those land there.
 [patch.crates-io]
-winit = { git = "https://github.com/aiongg/winit", branch = "craft/suite" }
+winit = { git = "https://github.com/aiongg/winit", branch = "craft/0.30.13-lang" }
 
 [workspace.lints.rust]
 unsafe_code = "deny"

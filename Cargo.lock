@@ -6030,7 +6030,7 @@ checksum = "589f6da84c646204747d1270a2a5661ea66ed1cced2631d546fdfb155959f9ec"
 [[package]]
 name = "winit"
 version = "0.30.13"
-source = "git+https://github.com/aiongg/winit?branch=craft%2Fsuite#616984d542c7a3274d1c0891aa43bdb0a9807d6b"
+source = "git+https://github.com/aiongg/winit?branch=craft%2F0.30.13-lang#8b35388bd719e8cc86a95971ba0bc026c9a8f058"
 dependencies = [
  "ahash",
  "android-activity",
@@ -6068,7 +6068,6 @@ dependencies = [
  "wasm-bindgen-futures",
  "wayland-backend",
  "wayland-client",
- "wayland-cursor",
  "wayland-protocols",
  "wayland-protocols-plasma",
  "web-sys",

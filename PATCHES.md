@@ -2,7 +2,7 @@
 
 Base: upstream tag `0.37.0` (`841a328b`). Each patch is a `craft/<topic>` branch off `0.37.0` (or off the
 topic named in its row), merged here in table order. The workspace patches `winit` to aiongg/winit
-`craft/suite`. Apps patch every egui-workspace crate they use to this checkout, so only one egui resolves.
+`craft/0.30.13-lang` (storytold/winit `craft/0.30.13` plus W17–W27). Apps patch every egui-workspace crate they use to this checkout, so only one egui resolves.
 Drop a patch when an egui release in use contains it.
 
 | # | Commit | Crate | Change | Upstream | Source in the suite |
@@ -23,9 +23,9 @@ Drop a patch when an egui release in use contains it.
 | E16 | `b3ef9771`, `bed6dfe3` | epaint, egui | visual cursor movement with affinity, Home/End in reading order, password mask per cluster, neutral paragraphs inherit direction | not proposed | language support |
 | E17 | `520435df` | egui | `Context::set_language`, `UiBuilder::language`, `Response::accessible_language`; AccessKit root language; one text run per bidi level | not proposed | screen readers (craft-libs#198) |
 | E18 | `89de8f3c` | eframe | `Frame::set_ui_language` sets `Context::set_language`; web falls back to `Context::language` | fork-only | craft-i18n UI language |
-| E19 | `d64047bf`, `642b74f7`, `baeb4515` | egui-winit, egui | one letter-key rule for Windows, macOS and Linux (first Latin group); `RawInput::keyboard_layout_is_latin`; `RawInput::latin_layout_chars` (each key's Latin layout character, so a key without a Latin letter is no letter shortcut) | fork-only until winit has the APIs | shortcuts on non-Latin layouts; needs winit `craft/suite` |
+| E19 | `d64047bf`, `642b74f7`, `baeb4515` | egui-winit, egui | one letter-key rule for Windows, macOS and Linux (first Latin group); `RawInput::keyboard_layout_is_latin`; `RawInput::latin_layout_chars` (each key's Latin layout character, so a key without a Latin letter is no letter shortcut) | fork-only until winit has the APIs | shortcuts on non-Latin layouts; needs winit `craft/0.30.13-lang` |
 | E20 | `23955535` | egui | widget text laid out in the language of its `Ui` | fork-only (goes with E15 and E17) | language support |
-| E21 | `a70470b0` | egui-winit, egui | `ImeEvent::DeleteSurroundingBytes`: `TextEdit` deletes the exact bytes an input method replaces, in the commit's undo step | not proposed | macOS press-and-hold and dictation, Wayland input methods; needs winit `craft/suite` |
+| E21 | `a70470b0` | egui-winit, egui | `ImeEvent::DeleteSurroundingBytes`: `TextEdit` deletes the exact bytes an input method replaces, in the commit's undo step | not proposed | macOS press-and-hold and dictation, Wayland input methods; needs winit `craft/0.30.13-lang` |
 
 E4 (egui-winit uses winit's Wayland clipboard) is not on this branch: it needs
 `winit::platform::wayland::Clipboard` (`for_display`, `load_text`, `store_text`) from storytold/winit

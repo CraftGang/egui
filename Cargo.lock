@@ -6030,7 +6030,7 @@ checksum = "589f6da84c646204747d1270a2a5661ea66ed1cced2631d546fdfb155959f9ec"
 [[package]]
 name = "winit"
 version = "0.30.13"
-source = "git+https://github.com/aiongg/winit?branch=craft%2Fsuite#04f273e0c4143911e5960a797113bdcf147db74d"
+source = "git+https://github.com/aiongg/winit?branch=craft%2Fsuite#616984d542c7a3274d1c0891aa43bdb0a9807d6b"
 dependencies = [
  "ahash",
  "android-activity",

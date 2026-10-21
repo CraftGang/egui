@@ -1,4 +1,4 @@
-use crate::{OrderedViewportIdMap, Theme, ViewportId, ViewportIdMap, emath::Rect};
+use crate::{Key, OrderedViewportIdMap, Theme, ViewportId, ViewportIdMap, emath::Rect};
 
 use super::{DroppedFileHandle, Event, HoveredFile, SafeAreaInsets, ViewportInfo};
 
@@ -97,6 +97,14 @@ pub struct RawInput {
     /// matching shortcuts by letter. `None` means "don't know": `egui-winit` reports it on
     /// Linux (X11 and Wayland) only.
     pub keyboard_layout_is_latin: Option<bool>,
+
+    /// For keys pressed in this input whose shortcuts follow the user's Latin layout rather than
+    /// the active one: the physical key, and the character it types on the Latin layout without
+    /// modifiers. A character other than a letter means the key has no Latin letter.
+    ///
+    /// `egui-winit` fills this on Linux (X11 and Wayland) while the layout isn't Latin, and on
+    /// macOS from the layout's ⌘ table while ⌘ is held. See [`Self::latin_layout_char`].
+    pub latin_layout_chars: Vec<(Key, char)>,
 }
 
 impl Default for RawInput {
@@ -114,6 +122,7 @@ impl Default for RawInput {
             focused: true, // integrations opt into global focus tracking
             system_theme: None,
             keyboard_layout_is_latin: None,
+            latin_layout_chars: Vec::new(),
             safe_area_insets: Default::default(),
         }
     }
@@ -126,6 +135,16 @@ impl RawInput {
     #[inline]
     pub fn keyboard_layout_is_latin(&self) -> Option<bool> {
         self.keyboard_layout_is_latin
+    }
+
+    /// The character `physical_key` types on the user's Latin layout, when it was pressed in this
+    /// input and its shortcuts follow that layout. See [`Self::latin_layout_chars`].
+    pub fn latin_layout_char(&self, physical_key: Key) -> Option<char> {
+        self.latin_layout_chars
+            .iter()
+            .rev()
+            .find(|(key, _)| *key == physical_key)
+            .map(|&(_, c)| c)
     }
 
     /// Info about the active viewport
@@ -157,6 +176,7 @@ impl RawInput {
             focused: self.focused,
             system_theme: self.system_theme,
             keyboard_layout_is_latin: self.keyboard_layout_is_latin,
+            latin_layout_chars: core::mem::take(&mut self.latin_layout_chars),
         }
     }
 
@@ -175,6 +195,7 @@ impl RawInput {
             focused,
             system_theme,
             keyboard_layout_is_latin,
+            mut latin_layout_chars,
             safe_area_insets: safe_area,
         } = newer;
 
@@ -190,6 +211,7 @@ impl RawInput {
         self.focused = focused;
         self.system_theme = system_theme;
         self.keyboard_layout_is_latin = keyboard_layout_is_latin.or(self.keyboard_layout_is_latin);
+        self.latin_layout_chars.append(&mut latin_layout_chars);
         self.safe_area_insets = safe_area.or(self.safe_area_insets);
     }
 }
@@ -209,6 +231,7 @@ impl RawInput {
             focused,
             system_theme,
             keyboard_layout_is_latin,
+            latin_layout_chars,
             safe_area_insets: safe_area,
         } = self;
 
@@ -241,6 +264,7 @@ impl RawInput {
         ui.label(format!(
             "keyboard_layout_is_latin: {keyboard_layout_is_latin:?}"
         ));
+        ui.label(format!("latin_layout_chars: {latin_layout_chars:?}"));
         ui.label(format!("safe_area: {safe_area:?}"));
         ui.scope(|ui| {
             ui.set_min_height(150.0);
@@ -278,5 +302,24 @@ mod tests {
             ..Default::default()
         });
         assert_eq!(input.safe_area_insets, Some(SafeAreaInsets::default()));
+    }
+
+    #[test]
+    fn latin_layout_chars_belong_to_one_input() {
+        let mut input = RawInput {
+            latin_layout_chars: vec![(Key::Q, 'q')],
+            ..Default::default()
+        };
+        input.append(RawInput {
+            latin_layout_chars: vec![(Key::Q, '\''), (Key::C, 'j')],
+            ..Default::default()
+        });
+        assert_eq!(input.latin_layout_char(Key::Q), Some('\''));
+        assert_eq!(input.latin_layout_char(Key::C), Some('j'));
+        assert_eq!(input.latin_layout_char(Key::V), None);
+
+        let frame = input.take();
+        assert_eq!(frame.latin_layout_char(Key::C), Some('j'));
+        assert_eq!(input.latin_layout_char(Key::C), None);
     }
 }

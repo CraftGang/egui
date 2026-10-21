@@ -23,7 +23,7 @@ Drop a patch when an egui release in use contains it.
 | E16 | `b3ef9771`, `bed6dfe3` | epaint, egui | visual cursor movement with affinity, Home/End in reading order, password mask per cluster, neutral paragraphs inherit direction | not proposed | language support |
 | E17 | `520435df` | egui | `Context::set_language`, `UiBuilder::language`, `Response::accessible_language`; AccessKit root language; one text run per bidi level | not proposed | screen readers (craft-libs#198) |
 | E18 | `89de8f3c` | eframe | `Frame::set_ui_language` sets `Context::set_language`; web falls back to `Context::language` | fork-only | craft-i18n UI language |
-| E19 | `d64047bf`, `642b74f7` | egui-winit, egui | one letter-key rule for Windows, macOS and Linux (first Latin group); `RawInput::keyboard_layout_is_latin` | fork-only until winit has the APIs | shortcuts on non-Latin layouts; needs winit `craft/suite` |
+| E19 | `d64047bf`, `642b74f7`, `baeb4515` | egui-winit, egui | one letter-key rule for Windows, macOS and Linux (first Latin group); `RawInput::keyboard_layout_is_latin`; `RawInput::latin_layout_chars` (each key's Latin layout character, so a key without a Latin letter is no letter shortcut) | fork-only until winit has the APIs | shortcuts on non-Latin layouts; needs winit `craft/suite` |
 | E20 | `23955535` | egui | widget text laid out in the language of its `Ui` | fork-only (goes with E15 and E17) | language support |
 | E21 | `a70470b0` | egui-winit, egui | `ImeEvent::DeleteSurroundingBytes`: `TextEdit` deletes the exact bytes an input method replaces, in the commit's undo step | not proposed | macOS press-and-hold and dictation, Wayland input methods; needs winit `craft/suite` |
 

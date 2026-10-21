@@ -9,6 +9,7 @@ Drop a patch when an egui release in use contains it.
 |---|---|---|---|---|---|
 | E1 | `8f3abf06` | eframe | `NativeOptions::viewport_hooks` (`ViewportHooks`): each viewport's native window on create/remove, and every viewport's raw input before egui (immediate viewports included); honoured by `run_native` and `create_native` | not proposed upstream yet | craft-tablet (native Wayland pen input) |
 | E2+E3 | `9dd799ab` | egui-wgpu | fit a surface within `max_texture_dimension_2d`; first configure and renderer creation inside wgpu error scopes, returned as `WgpuError::ConfigureSurface` / `CreateRenderer` | not proposed; the surface fit would close emilk/egui#8361 | pdfcraft#609 (#577), #617 (#519), #1042; gridcraft#761 |
+| E4 | `66bacf23` | egui-winit | Wayland: copy and paste through winit's clipboard (`winit::platform::wayland::Clipboard`, W15), so smithay-clipboard doesn't bind a second data device; PRIMARY goes through arboard meanwhile | emilk/egui#8657 (draft) | photocraft#7828, filmcraft#1115, pdfcraft#3254 (Hyprland); storytold/egui `craft/0.36.2` `c01acc2`; needs winit W15 |
 | E5 | `0e27d87e`, `777977b7`, `f7e89e23`, `5b2b8e19` | epaint, egui | bidi text: right-to-left runs shaped, rows in visual order, marks, end caret and selection; word-motion underflow fix; tests build without `default_fonts` | emilk/egui#8577 (open) ported, with #8698 and review fixes | language support (craft-libs#198) |
 | E6 | `0abfabcf` | egui | `request_focus` on the focused widget no longer interrupts IME composition | not proposed | IME input |
 | E7 | `0670c58a` | egui-winit | Windows: letter keys from the virtual-key code on layouts without A–Z (Russian, Arabic, Hebrew) | not proposed | shortcuts on non-Latin layouts |
@@ -27,10 +28,7 @@ Drop a patch when an egui release in use contains it.
 | E20 | `23955535` | egui | widget text laid out in the language of its `Ui` | fork-only (goes with E15 and E17) | language support |
 | E21 | `a70470b0` | egui-winit, egui | `ImeEvent::DeleteSurroundingBytes`: `TextEdit` deletes the exact bytes an input method replaces, in the commit's undo step | not proposed | macOS press-and-hold and dictation, Wayland input methods; needs winit `craft/0.30.13-lang` |
 
-E4 (egui-winit uses winit's Wayland clipboard) is not on this branch: it needs
-`winit::platform::wayland::Clipboard` (`for_display`, `load_text`, `store_text`) from storytold/winit
-`craft/0.30.13` W15, which aiongg/winit `craft/suite` doesn't have.
-
 E1 changes from `e7e37ad`: the hooks are installed in `init_native`, so `create_native` uses them too, and a
 unit test covers installing and replacing them. E2+E3 is the same change as `b02321d` with a `surface_fit`
-test.
+test. E4 is storytold/egui `c01acc2` on 0.37's `unsafe` `Clipboard::new`; it is merged last because it
+needs the `craft/0.30.13-lang` pin.

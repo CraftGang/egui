@@ -132,14 +132,16 @@ mod tests {
         CaretPositionKey::new(geometry())
     }
 
-    #[test]
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+    #[cfg_attr(not(target_arch = "wasm32"), test)]
     fn unchanged_caret_position_is_not_written_again() {
         let mut tracker = CaretPositionTracker::default();
         assert_eq!(tracker.update(Some(key())), Some(key()));
         assert_eq!(tracker.update(Some(key())), None);
     }
 
-    #[test]
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+    #[cfg_attr(not(target_arch = "wasm32"), test)]
     fn caret_movement_changes_the_key() {
         let mut tracker = CaretPositionTracker::default();
         assert!(tracker.update(Some(key())).is_some());
@@ -149,7 +151,8 @@ mod tests {
         assert!(tracker.update(Some(CaretPositionKey::new(moved))).is_some());
     }
 
-    #[test]
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+    #[cfg_attr(not(target_arch = "wasm32"), test)]
     fn zoom_dpi_and_canvas_geometry_change_the_key() {
         let base = key();
 
@@ -198,7 +201,8 @@ mod tests {
         CaretPositionKey::new(CaretGeometry::from_ime(ime, canvas(), 1.0))
     }
 
-    #[test]
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+    #[cfg_attr(not(target_arch = "wasm32"), test)]
     fn text_owner_selection_purpose_and_cause_do_not_affect_the_position() {
         let short = ime("a", 1, 1, 20.0);
         let mut long = ime(&"a".repeat(5000), 2, 7, 20.0);
@@ -208,7 +212,8 @@ mod tests {
         assert_eq!(key_for(&short), key_for(&long));
     }
 
-    #[test]
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+    #[cfg_attr(not(target_arch = "wasm32"), test)]
     fn losing_and_regaining_focus_writes_the_same_position_again() {
         let mut tracker = CaretPositionTracker::default();
         assert_eq!(tracker.update(Some(key())), Some(key()));

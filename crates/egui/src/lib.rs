@@ -514,7 +514,7 @@ pub use self::{
     id_salt::{AsIdSalt, IdSalt, IdSaltMap, IdSaltSet},
     ime_context::{
         CommittedText, ImeContextTracker, ImeContextUpdate, ImeMutationStamp, ImeObservation,
-        ImeTarget,
+        ImeResetId, ImeTarget,
     },
     input_state::{InputOptions, InputState, MultiTouchInfo, PointerState, SurrenderFocusOn},
     layers::{LayerId, Order},

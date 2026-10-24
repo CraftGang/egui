@@ -960,3 +960,96 @@ fn password_ime_commit_is_never_input_method() {
         IMESurroundingText::Unavailable
     ));
 }
+
+#[test]
+fn reset_completion_is_control_only_for_stock_text_edit_composition_and_undo() {
+    for bytes in [false, true] {
+        let mut field = Field::new("éx");
+        field.frame(vec![]);
+        let request_id = field.ctx.request_ime_reset(ViewportId::ROOT).unwrap();
+        let marker = Event::ImeResetCompleted { request_id };
+        let unchanged = field.frame(vec![marker.clone()]);
+        assert_eq!(
+            field.text, "éx",
+            "completion itself must not edit the buffer"
+        );
+        assert_eq!(Field::payload(&unchanged).cursor, "éx".len());
+        assert_eq!(unchanged.reset_request, Some(request_id));
+
+        let deletion = if bytes {
+            ImeEvent::DeleteSurroundingBytes {
+                before_bytes: 1,
+                after_bytes: 0,
+            }
+        } else {
+            ImeEvent::DeleteSurrounding {
+                before_chars: 1,
+                after_chars: 0,
+            }
+        };
+        let changed = field.frame(vec![
+            Event::Ime(deletion),
+            marker.clone(),
+            commit("y"),
+            marker,
+        ]);
+        assert_eq!(
+            field.text, "éy",
+            "a valid delete→commit remains one mutation chain"
+        );
+        assert_eq!(changed.change_cause, ImeChangeCause::InputMethod);
+        let undo = field.frame(vec![Event::Key {
+            key: Key::Z,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: Modifiers::COMMAND,
+        }]);
+        assert_eq!(
+            field.text, "éx",
+            "the interspersed marker creates no extra undo step"
+        );
+        assert_eq!(undo.change_cause, ImeChangeCause::Other);
+        field.frame(vec![commit("!")]);
+        assert_eq!(
+            field.text, "éx!",
+            "direct commit without old composition stays valid"
+        );
+    }
+}
+
+#[test]
+fn reset_completion_does_not_end_stock_preedit_or_move_its_selection() {
+    let mut with_control = Field::new("prefix");
+    let mut baseline = Field::new("prefix");
+    with_control.frame(vec![]);
+    baseline.frame(vec![]);
+    let a = with_control.frame(vec![preedit("かな")]);
+    let b = baseline.frame(vec![preedit("かな")]);
+    assert_eq!(with_control.text, baseline.text);
+    assert_eq!(Field::payload(&a), Field::payload(&b));
+    let request_id = with_control
+        .ctx
+        .request_ime_reset(ViewportId::ROOT)
+        .unwrap();
+    let a = with_control.frame(vec![Event::ImeResetCompleted { request_id }]);
+    let b = baseline.frame(vec![]);
+    assert_eq!(
+        with_control.text, baseline.text,
+        "control is ignored by ordinary TextEdit"
+    );
+    assert_eq!(
+        Field::payload(&a),
+        Field::payload(&b),
+        "committed snapshot and caret remain identical"
+    );
+    let a = with_control.frame(vec![
+        preedit(""),
+        Event::ImeResetCompleted { request_id },
+        commit("語"),
+    ]);
+    let b = baseline.frame(vec![preedit(""), commit("語")]);
+    assert_eq!(with_control.text, "prefix語");
+    assert_eq!(with_control.text, baseline.text);
+    assert_eq!(Field::payload(&a), Field::payload(&b));
+}

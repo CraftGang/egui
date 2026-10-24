@@ -122,6 +122,10 @@ pub struct Memory {
     /// this pass.
     #[cfg_attr(feature = "persistence", serde(skip))]
     requested_interrupt_ime: bool,
+
+    /// Unpublished application requests survive hidden iterations and passes with no descriptor.
+    #[cfg_attr(feature = "persistence", serde(skip))]
+    requested_ime_resets: ViewportIdMap<crate::ImeResetId>,
 }
 
 impl Default for Memory {
@@ -140,6 +144,7 @@ impl Default for Memory {
             everything_is_visible: Default::default(),
             add_fonts: Default::default(),
             requested_interrupt_ime: Default::default(),
+            requested_ime_resets: Default::default(),
         };
         slf.interactions.entry(slf.viewport_id).or_default();
         slf.areas.entry(slf.viewport_id).or_default();
@@ -806,6 +811,8 @@ impl Memory {
         self.interactions.retain(|id, _| viewports.contains(id));
         self.areas.retain(|id, _| viewports.contains(id));
         self.popups.retain(|id, _| viewports.contains(id));
+        self.requested_ime_resets
+            .retain(|id, _| viewports.contains(id));
 
         self.areas.entry(self.viewport_id).or_default();
 
@@ -1096,6 +1103,16 @@ impl Memory {
     /// Interrupt the current IME composition, if any.
     pub fn interrupt_ime(&mut self) {
         self.requested_interrupt_ime = true;
+    }
+
+    pub(crate) fn request_ime_reset(&mut self, viewport: ViewportId) -> Option<crate::ImeResetId> {
+        let request = crate::ImeResetId::allocate(viewport)?;
+        self.requested_ime_resets.insert(viewport, request);
+        Some(request)
+    }
+
+    pub(crate) fn take_ime_reset(&mut self, viewport: ViewportId) -> Option<crate::ImeResetId> {
+        self.requested_ime_resets.remove(&viewport)
     }
 
     pub(crate) fn should_interrupt_ime(&self) -> bool {
@@ -1600,4 +1617,21 @@ fn set_state_makes_layer_hit_testable() {
 
     let (inside, _) = run_pass(false);
     assert_ne!(inside, Some(layer_id), "gone once no longer registered");
+}
+
+#[test]
+fn requested_ime_resets_are_isolated_per_viewport_and_do_not_replace_stock_interrupt() {
+    let mut memory = Memory::default();
+    let root = crate::ViewportId::ROOT;
+    let other = crate::ViewportId::from_hash_of("reset memory other");
+    let old = memory.request_ime_reset(root).unwrap();
+    let newer = memory.request_ime_reset(root).unwrap();
+    let separate = memory.request_ime_reset(other).unwrap();
+    assert_ne!(old, newer);
+    memory.interrupt_ime();
+    assert!(memory.should_interrupt_ime());
+    assert_eq!(memory.take_ime_reset(other), Some(separate));
+    assert_eq!(memory.take_ime_reset(root), Some(newer));
+    assert_eq!(memory.take_ime_reset(root), None);
+    assert_eq!(memory.take_ime_reset(other), None);
 }

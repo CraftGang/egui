@@ -117,6 +117,7 @@ pub fn text_from_keyboard_event(event: &web_sys::KeyboardEvent) -> Option<String
 #[derive(Clone, Default)]
 pub(crate) struct KeyboardKeys {
     resolver: Rc<RefCell<KeyResolver>>,
+    presses: Rc<RefCell<crate::web_ime_reset::HeldPresses>>,
     layout_map_pending: Rc<Cell<bool>>,
 }
 
@@ -131,6 +132,9 @@ impl KeyboardKeys {
             .resolver
             .borrow_mut()
             .key_down(&event.key(), &event.code(), plain);
+        self.presses
+            .borrow_mut()
+            .press(&event.key(), &event.code(), down.key);
         if down.query_layout_map {
             self.read_layout_map();
         }
@@ -139,12 +143,44 @@ impl KeyboardKeys {
 
     /// The logical key and the physical key of a `keyup`.
     pub fn key_up(&self, event: &web_sys::KeyboardEvent) -> (Option<egui::Key>, Option<egui::Key>) {
+        self.presses
+            .borrow_mut()
+            .release(&event.key(), &event.code());
         self.resolver
             .borrow_mut()
             .key_up(&event.key(), &event.code())
     }
 
+    pub fn press_id(
+        &self,
+        event: &web_sys::KeyboardEvent,
+    ) -> Option<crate::web_ime_reset::PressId> {
+        self.presses.borrow().current(&event.key(), &event.code())
+    }
+
+    pub fn key_up_if_current(
+        &self,
+        event: &web_sys::KeyboardEvent,
+        receipt: crate::web_ime_reset::PressId,
+    ) -> (Option<egui::Key>, Option<egui::Key>) {
+        if !self
+            .presses
+            .borrow_mut()
+            .release_matching(&event.key(), &event.code(), receipt)
+        {
+            return (None, None);
+        }
+        self.resolver
+            .borrow_mut()
+            .key_up(&event.key(), &event.code())
+    }
+
+    pub fn release_receipts_for(&self, key: egui::Key) {
+        self.presses.borrow_mut().release_logical(key);
+    }
+
     pub fn clear_pressed(&self) {
+        self.presses.borrow_mut().clear();
         self.resolver.borrow_mut().clear_pressed();
     }
 

@@ -205,32 +205,57 @@ fn parse_query_map(query: &str) -> BTreeMap<String, Vec<String>> {
     map
 }
 
-// TODO(emilk): this test is never acgtually run, because this whole module is wasm32 only 🤦‍♂️
-#[test]
+#[cfg(test)]
+#[wasm_bindgen_test::wasm_bindgen_test]
 fn test_parse_query() {
-    assert_eq!(parse_query_map(""), BTreeMap::default());
-    assert_eq!(parse_query_map("foo"), BTreeMap::from_iter([("foo", "")]));
+    assert_eq!(
+        parse_query_map(""),
+        BTreeMap::default(),
+        "empty query has no entries"
+    );
+    assert_eq!(
+        parse_query_map("foo"),
+        BTreeMap::from_iter([("foo".to_owned(), vec![String::new()])]),
+        "bare key has one empty value"
+    );
     assert_eq!(
         parse_query_map("foo=bar"),
-        BTreeMap::from_iter([("foo", "bar")])
+        BTreeMap::from_iter([("foo".to_owned(), vec!["bar".to_owned()])]),
+        "single assignment retains its value"
     );
     assert_eq!(
         parse_query_map("foo=bar&baz=42"),
-        BTreeMap::from_iter([("foo", "bar"), ("baz", "42")])
+        BTreeMap::from_iter([
+            ("foo".to_owned(), vec!["bar".to_owned()]),
+            ("baz".to_owned(), vec!["42".to_owned()])
+        ]),
+        "distinct keys retain their values"
     );
     assert_eq!(
         parse_query_map("foo&baz=42"),
-        BTreeMap::from_iter([("foo", ""), ("baz", "42")])
+        BTreeMap::from_iter([
+            ("foo".to_owned(), vec![String::new()]),
+            ("baz".to_owned(), vec!["42".to_owned()])
+        ]),
+        "bare and assigned keys coexist"
     );
     assert_eq!(
         parse_query_map("foo&baz&&"),
-        BTreeMap::from_iter([("foo", ""), ("baz", "")])
+        BTreeMap::from_iter([
+            ("foo".to_owned(), vec![String::new()]),
+            ("baz".to_owned(), vec![String::new()])
+        ]),
+        "empty separators do not create entries"
     );
     assert_eq!(
         parse_query_map("badger=data.rrd%3Fparam1%3Dfoo%26param2%3Dbar&mushroom=snake"),
         BTreeMap::from_iter([
-            ("badger", "data.rrd?param1=foo&param2=bar"),
-            ("mushroom", "snake")
-        ])
+            (
+                "badger".to_owned(),
+                vec!["data.rrd?param1=foo&param2=bar".to_owned()]
+            ),
+            ("mushroom".to_owned(), vec!["snake".to_owned()])
+        ]),
+        "percent-encoded query delimiters remain inside the value"
     );
 }

@@ -44,6 +44,7 @@ mod clipboard_image;
 #[cfg(not(target_arch = "wasm32"))]
 mod dropped_file;
 mod held_keys;
+mod ime_reset;
 #[cfg(all(
     feature = "wayland",
     unix,
@@ -261,6 +262,7 @@ pub struct State {
     pub accesskit: Option<accesskit_winit::Adapter>,
 
     allow_ime: bool,
+    ime_reset: ime_reset::ResetBridge<winit::window::WindowId>,
 
     /// See [`Self::set_clipboard_shortcuts`].
     clipboard_shortcuts: bool,
@@ -651,6 +653,7 @@ impl State {
             accesskit: None,
 
             allow_ime: false,
+            ime_reset: Default::default(),
             clipboard_shortcuts: true,
             ime_cursor_rect_px: None,
             old_ime_purpose: egui::IMEPurpose::Normal,
@@ -1041,6 +1044,20 @@ impl State {
         OutputClaimOrigins::NotWayland
     }
 
+    #[cfg_attr(
+        not(all(
+            feature = "clipboard",
+            feature = "wayland",
+            any(
+                target_os = "linux",
+                target_os = "dragonfly",
+                target_os = "freebsd",
+                target_os = "netbsd",
+                target_os = "openbsd"
+            ),
+        )),
+        expect(clippy::needless_pass_by_ref_mut)
+    )]
     fn take_regular_output_origin(origins: &mut OutputClaimOrigins) -> OutputClaimOrigin {
         #[cfg(all(
             feature = "clipboard",
@@ -1077,6 +1094,20 @@ impl State {
         OutputClaimOrigin::NotWayland
     }
 
+    #[cfg_attr(
+        not(all(
+            feature = "clipboard",
+            feature = "wayland",
+            any(
+                target_os = "linux",
+                target_os = "dragonfly",
+                target_os = "freebsd",
+                target_os = "netbsd",
+                target_os = "openbsd"
+            ),
+        )),
+        expect(clippy::needless_pass_by_ref_mut)
+    )]
     fn take_primary_output_origin(origins: &mut OutputClaimOrigins) -> OutputClaimOrigin {
         #[cfg(all(
             feature = "clipboard",
@@ -1251,55 +1282,27 @@ impl State {
 
     /// Record an explicit stale/failed/missing origin rejection and count it as a clipboard
     /// failure. Unlike a transport "not found" result, an origin rejection is never routine.
-    #[cfg_attr(
-        not(all(
-            feature = "clipboard",
-            feature = "wayland",
-            any(
-                target_os = "linux",
-                target_os = "dragonfly",
-                target_os = "freebsd",
-                target_os = "netbsd",
-                target_os = "openbsd"
-            ),
-        )),
-        expect(clippy::needless_pass_by_ref_mut, clippy::unused_self)
-    )]
+    #[cfg(all(
+        feature = "clipboard",
+        feature = "wayland",
+        any(
+            target_os = "linux",
+            target_os = "dragonfly",
+            target_os = "freebsd",
+            target_os = "netbsd",
+            target_os = "openbsd"
+        ),
+    ))]
     fn record_claim_origin_failure(
         &mut self,
         action: &str,
         error: &clipboard_bridge::ClaimOriginError,
     ) {
-        #[cfg(all(
-            feature = "clipboard",
-            feature = "wayland",
-            any(
-                target_os = "linux",
-                target_os = "dragonfly",
-                target_os = "freebsd",
-                target_os = "netbsd",
-                target_os = "openbsd"
-            ),
-        ))]
-        {
-            self.clipboard_failures = self.clipboard_failures.wrapping_add(1);
-            log::warn!(
-                "winit Wayland clipboard {action} rejected the output origin ({} failures this session): {error}",
-                self.clipboard_failures
-            );
-        }
-        #[cfg(not(all(
-            feature = "clipboard",
-            feature = "wayland",
-            any(
-                target_os = "linux",
-                target_os = "dragonfly",
-                target_os = "freebsd",
-                target_os = "netbsd",
-                target_os = "openbsd"
-            ),
-        )))]
-        let _ = (action, error);
+        self.clipboard_failures = self.clipboard_failures.wrapping_add(1);
+        log::warn!(
+            "winit Wayland clipboard {action} rejected the output origin ({} failures this session): {error}",
+            self.clipboard_failures
+        );
     }
 
     /// Number of Wayland clipboard requests or ownership claims rejected since construction.
@@ -1362,6 +1365,7 @@ impl State {
             target_os = "openbsd"
         ),
     )))]
+    #[expect(clippy::needless_pass_by_ref_mut)]
     fn cancel_pending_image_copy(&mut self) {
         let _ = self;
     }
@@ -1405,6 +1409,7 @@ impl State {
             target_os = "openbsd"
         ),
     )))]
+    #[expect(clippy::needless_pass_by_ref_mut)]
     fn invalidate_image_copy_for_regular_output(&mut self, _window: &Window) {
         let _ = self;
     }
@@ -1500,6 +1505,7 @@ impl State {
             target_os = "openbsd"
         ),
     )))]
+    #[expect(clippy::needless_pass_by_ref_mut)]
     fn install_pending_image_copy(&mut self, _window: &Window) {
         let _ = self;
     }
@@ -1681,6 +1687,20 @@ impl State {
     ///
     /// `origin` was resolved once for the whole output batch. A rejected stale/failed capture
     /// fails here without asking for another origin; the previous clipboard source is preserved.
+    #[cfg_attr(
+        not(all(
+            feature = "clipboard",
+            feature = "wayland",
+            any(
+                target_os = "linux",
+                target_os = "dragonfly",
+                target_os = "freebsd",
+                target_os = "netbsd",
+                target_os = "openbsd"
+            ),
+        )),
+        expect(clippy::needless_pass_by_value)
+    )]
     fn copy_text_output(&mut self, _window: &Window, text: String, origin: OutputClaimOrigin) {
         #[cfg(all(
             feature = "clipboard",
@@ -1749,6 +1769,20 @@ impl State {
     /// the bounded encode worker without cloning, and the reserved PNG is installed on the
     /// event-loop thread after the encode completion repaint. A rejected origin, reservation,
     /// encode or claim leaves the previously installed clipboard source unchanged.
+    #[cfg_attr(
+        not(all(
+            feature = "clipboard",
+            feature = "wayland",
+            any(
+                target_os = "linux",
+                target_os = "dragonfly",
+                target_os = "freebsd",
+                target_os = "netbsd",
+                target_os = "openbsd"
+            ),
+        )),
+        expect(clippy::needless_pass_by_value)
+    )]
     fn copy_image_output(
         &mut self,
         _window: &Window,
@@ -1873,6 +1907,20 @@ impl State {
     ///
     /// Existing unchanged-selection suppression is handled before origin resolution in
     /// [`Self::handle_platform_output_inner`], so this method consumes no origin when suppressed.
+    #[cfg_attr(
+        not(all(
+            feature = "clipboard",
+            feature = "wayland",
+            any(
+                target_os = "linux",
+                target_os = "dragonfly",
+                target_os = "freebsd",
+                target_os = "netbsd",
+                target_os = "openbsd"
+            ),
+        )),
+        expect(clippy::needless_pass_by_value)
+    )]
     fn primary_selection_output(
         &mut self,
         _window: &Window,
@@ -1953,6 +2001,9 @@ impl State {
     /// Set the last value that [`Window::set_ime_allowed()`] was called with.
     pub fn set_allow_ime(&mut self, allow: bool) {
         self.allow_ime = allow;
+        if !allow {
+            self.ime_reset.invalidate();
+        }
     }
 
     /// Are clipboard keyboard shortcuts translated into clipboard events?
@@ -2161,6 +2212,18 @@ impl State {
                 }
             }
 
+            WindowEvent::ImeResetCompleted { .. } => {
+                let forwarded = self.ime_reset.on_event(
+                    window.id(),
+                    self.viewport_id,
+                    event,
+                    &mut self.egui_input.events,
+                );
+                EventResponse {
+                    repaint: forwarded,
+                    consumed: false,
+                }
+            }
             WindowEvent::Ime(ime) => {
                 if matches!(ime, winit::event::Ime::Commit(_))
                     && let Some((before_bytes, after_bytes)) = ime_delete_surrounding(window)
@@ -2235,6 +2298,7 @@ impl State {
                 ))]
                 self.ime_gate.set_focused(focused);
                 if !focused {
+                    self.ime_reset.invalidate();
                     // Avoid sticky modifiers when focus is lost (egui clears its own copy too).
                     self.modifiers = egui::Modifiers::default();
                     self.held_keys.clear();
@@ -2329,6 +2393,7 @@ impl State {
             }
 
             WindowEvent::Destroyed => {
+                self.ime_reset.invalidate();
                 self.held_keys.clear();
                 self.modifiers = egui::Modifiers::default();
                 self.egui_input.focused = false;
@@ -2695,19 +2760,9 @@ impl State {
     ///
     /// X11 windows in a Wayland-capable winit build, and all non-Wayland targets, keep the
     /// pre-existing raw `set_ime_allowed` behavior.
-    // The Wayland implementation mutates the per-window protocol state.
-    #[cfg_attr(
-        not(all(
-            feature = "wayland",
-            unix,
-            not(target_vendor = "apple"),
-            not(target_os = "android"),
-            not(target_os = "emscripten"),
-            not(target_os = "redox"),
-        )),
-        expect(clippy::needless_pass_by_ref_mut, clippy::unused_self)
-    )]
+    // Reset admission changes on every platform; Wayland also updates protocol/cache state.
     fn handle_external_ime_allowed(&mut self, window: &Window, allowed: bool) {
+        self.ime_reset.external_allowed(allowed);
         #[cfg(all(
             feature = "wayland",
             unix,
@@ -3274,6 +3329,20 @@ impl State {
         }
         // Consume the prepared batch slot even if no clipboard command wins. Otherwise an unused
         // token from this input batch could be mistaken for a later programmatic copy's origin.
+        #[cfg_attr(
+            not(all(
+                feature = "clipboard",
+                feature = "wayland",
+                any(
+                    target_os = "linux",
+                    target_os = "dragonfly",
+                    target_os = "freebsd",
+                    target_os = "netbsd",
+                    target_os = "openbsd"
+                ),
+            )),
+            expect(clippy::let_unit_value)
+        )]
         let captured_claim_origin = self.take_clipboard_claim_origin();
         let mut claim_origins = self.resolve_output_claim_origins(
             window,
@@ -3380,28 +3449,38 @@ impl State {
             window.set_ime_allowed(allow_ime);
         }
 
-        if let Some(ime) = &ime {
-            // Never interrupt (and thereby re-enable) a window that the focus latch or an
-            // external `IMEAllowed(false)` disabled for this pass.
-            if self.allow_ime && !is_toggling_ime && ime.should_interrupt_composition {
-                // TODO(umajho): use a more proper way to interrupt composition
-                // if `winit` provides one in the future.
-
+        // This is settled output. Preparing a call does not synthesize an input marker.
+        let reset_request =
+            self.ime_reset
+                .prepare(window.id(), self.viewport_id, ime.as_ref(), self.allow_ime);
+        let stock_interrupt = reset_request.is_none()
+            && self.allow_ime
+            && !is_toggling_ime
+            && ime
+                .as_ref()
+                .is_some_and(|ime| ime.should_interrupt_composition && ime.reset_request.is_none());
+        if reset_request.is_some() || stock_interrupt {
+            if let Some(request) = reset_request {
+                window.reset_ime_with_request(request.as_u64());
+            } else {
+                // Preserve the stock untokened interruption operation and timing.
                 window.set_ime_allowed(false);
                 window.set_ime_allowed(true);
-                #[cfg(all(
-                    feature = "wayland",
-                    unix,
-                    not(target_vendor = "apple"),
-                    not(target_os = "android"),
-                    not(target_os = "emscripten"),
-                    not(target_os = "redox"),
-                ))]
-                {
-                    ime_context_was_reset = true;
-                }
             }
+            #[cfg(all(
+                feature = "wayland",
+                unix,
+                not(target_vendor = "apple"),
+                not(target_os = "android"),
+                not(target_os = "emscripten"),
+                not(target_os = "redox"),
+            ))]
+            {
+                ime_context_was_reset = true;
+            }
+        }
 
+        if let Some(ime) = &ime {
             if ime.purpose != self.old_ime_purpose {
                 self.old_ime_purpose = ime.purpose;
                 window.set_ime_purpose(to_winit_ime_purpose(ime.purpose));
@@ -4456,8 +4535,10 @@ fn process_viewport_command(
             state.handle_external_ime_allowed(window, v);
         }
         ViewportCommand::IMEPurpose(p) => {
-            if p != state.old_ime_purpose {
-                state.old_ime_purpose = p;
+            if state
+                .ime_reset
+                .apply_purpose_command(&mut state.old_ime_purpose, p)
+            {
                 window.set_ime_purpose(to_winit_ime_purpose(p));
                 #[cfg(all(
                     feature = "wayland",
@@ -5030,6 +5111,7 @@ pub fn short_window_event_description(event: &winit::event::WindowEvent) -> &'st
         WindowEvent::KeyboardInput { .. } => "WindowEvent::KeyboardInput",
         WindowEvent::ModifiersChanged { .. } => "WindowEvent::ModifiersChanged",
         WindowEvent::Ime { .. } => "WindowEvent::Ime",
+        WindowEvent::ImeResetCompleted { .. } => "WindowEvent::ImeResetCompleted",
         WindowEvent::CursorMoved { .. } => "WindowEvent::CursorMoved",
         WindowEvent::CursorEntered { .. } => "WindowEvent::CursorEntered",
         WindowEvent::CursorLeft { .. } => "WindowEvent::CursorLeft",

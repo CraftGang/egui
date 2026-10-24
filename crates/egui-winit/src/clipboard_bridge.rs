@@ -142,6 +142,7 @@ pub(crate) enum PasteKind {
 /// `PngBytes`; tests can wrap an ordinary `Arc<[u8]>`-like payload.
 pub(crate) trait EncodedPng: Send + Sync {
     /// The exact encoded PNG bytes.
+    #[allow(clippy::allow_attributes, dead_code)] // Only the optional image codec reads these bytes.
     fn as_bytes(&self) -> &[u8];
 
     /// The encoded payload length in bytes.
@@ -150,6 +151,7 @@ pub(crate) trait EncodedPng: Send + Sync {
 
 /// One combined regular-read result.
 #[derive(Clone)]
+#[allow(clippy::allow_attributes, dead_code)] // Constructed by the optional Wayland transport and tests.
 pub(crate) enum PasteContent {
     /// Normalized UTF-8 text.
     Text(Arc<str>),
@@ -195,6 +197,7 @@ impl core::fmt::Debug for DecodedPasteImage {
 }
 
 impl DecodedPasteImage {
+    #[allow(clippy::allow_attributes, dead_code)] // Called by the optional image codec and tests.
     pub(crate) fn new(image: egui::ColorImage, retention: Box<dyn Send + Sync>) -> Self {
         Self { image, retention }
     }
@@ -258,6 +261,7 @@ pub(crate) trait ClipboardTransport {
     /// Invalidate pending regular image reservations for a new winning regular output.
     ///
     /// Non-image transports keep the no-op default.
+    #[allow(clippy::allow_attributes, dead_code)] // Called by the image-enabled Wayland output path.
     fn invalidate_image_reservations(&self, _target_window: WindowId) -> Result<(), PasteError> {
         Ok(())
     }
@@ -508,6 +512,7 @@ impl From<ClaimOriginError> for io::Error {
 /// `None` means that family has no winner. A `Some(Err(..))` winner must fail explicitly and
 /// leave the previous clipboard source unchanged.
 #[derive(Debug)]
+#[allow(clippy::allow_attributes, dead_code)] // Read by the Wayland output path and tests.
 pub(crate) struct BatchClaimOrigins<Token> {
     /// Origin for the winning regular text or image command.
     pub regular: Option<Result<Token, ClaimOriginError>>,

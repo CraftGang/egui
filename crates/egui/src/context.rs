@@ -1161,6 +1161,21 @@ impl Context {
         output
     }
 
+    /// Request an ordered native IME cancellation fence for an application interruption.
+    ///
+    /// Call at the actual target/caret interruption and retain the returned id alongside that
+    /// target. Another interruption must request a new id, even for the same owner/generation.
+    /// Unpublished requests survive hidden/no-descriptor iterations; the next IME output for
+    /// this viewport carries the latest request once. Discarded passes retain it only for the
+    /// same final IME owner/context. This does not acknowledge cancellation.
+    ///
+    /// Process-unique token exhaustion returns `None`; keep stale-input protection in that case.
+    /// Unsupported integrations may never emit [`crate::Event::ImeResetCompleted`]. Do not use
+    /// idle time, ordinary empty preedit, or generic Enabled/Disabled as a substitute.
+    pub fn request_ime_reset(&self, viewport_id: ViewportId) -> Option<crate::ImeResetId> {
+        self.memory_mut(|memory| memory.request_ime_reset(viewport_id))
+    }
+
     /// Run app logic without showing any ui.
     ///
     /// Use this instead of [`Self::run_ui`] when nothing will be shown,
@@ -1206,14 +1221,23 @@ impl Context {
 
         logic(self);
 
-        self.write(|ctx| LogicOutput {
-            platform_output: core::mem::take(&mut ctx.viewport_for(viewport_id).output),
-            viewport_commands: ctx
-                .viewports
-                .iter_mut()
-                .filter(|(_, viewport)| !viewport.commands.is_empty())
-                .map(|(&id, viewport)| (id, core::mem::take(&mut viewport.commands)))
-                .collect(),
+        self.write(|ctx| {
+            let mut platform_output = core::mem::take(&mut ctx.viewport_for(viewport_id).output);
+            if let Some(ime) = &mut platform_output.ime
+                && let Some(request) = ctx.memory.take_ime_reset(viewport_id)
+            {
+                ime.reset_request = Some(request);
+                ime.should_interrupt_composition = true;
+            }
+            LogicOutput {
+                platform_output,
+                viewport_commands: ctx
+                    .viewports
+                    .iter_mut()
+                    .filter(|(_, viewport)| !viewport.commands.is_empty())
+                    .map(|(&id, viewport)| (id, core::mem::take(&mut viewport.commands)))
+                    .collect(),
+            }
         })
     }
 
@@ -3210,10 +3234,14 @@ impl ContextImpl {
 
         let mut platform_output: PlatformOutput = core::mem::take(&mut viewport.output);
 
-        if self.memory.should_interrupt_ime()
-            && let Some(ime) = &mut platform_output.ime
-        {
-            ime.should_interrupt_composition = true;
+        if let Some(ime) = &mut platform_output.ime {
+            if self.memory.should_interrupt_ime() {
+                ime.should_interrupt_composition = true;
+            }
+            if let Some(request) = self.memory.take_ime_reset(ended_viewport_id) {
+                ime.reset_request = Some(request);
+                ime.should_interrupt_composition = true;
+            }
         }
 
         {

@@ -175,6 +175,13 @@ mod web_keys;
 #[cfg(any(target_arch = "wasm32", test))]
 mod web_caret_position;
 
+/// Local request admission and DOM composition-session guard, also tested natively.
+#[cfg(any(target_arch = "wasm32", test))]
+mod web_ime_reset;
+
+#[cfg(all(test, target_arch = "wasm32"))]
+wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_browser);
+
 // ----------------------------------------------------------------------------
 // When compiling for web
 

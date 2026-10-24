@@ -351,6 +351,13 @@ pub struct IMEOutput {
     /// Whether any ongoing IME composition should be interrupted.
     pub should_interrupt_composition: bool,
 
+    /// Request-bound cancellation fence, created at the actual application interruption.
+    ///
+    /// The integration must wait for its actual native completion before emitting
+    /// [`crate::Event::ImeResetCompleted`]. `None` retains the stock untokened interrupt API.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub reset_request: Option<crate::ImeResetId>,
+
     /// Why the surrounding-text snapshot changed.
     ///
     /// [`ImeChangeCause::Other`] is used for context transitions, application edits and any
@@ -380,6 +387,7 @@ impl core::fmt::Debug for IMEOutput {
                 "should_interrupt_composition",
                 &self.should_interrupt_composition,
             )
+            .field("reset_request", &self.reset_request)
             .field("change_cause", &self.change_cause)
             .field("surrounding_text", &self.surrounding_text)
             .finish()
@@ -430,6 +438,7 @@ impl IMEOutput {
             rect,
             cursor_rect,
             should_interrupt_composition: false,
+            reset_request: None,
             change_cause: ImeChangeCause::Other,
             surrounding_text: IMESurroundingText::Unavailable,
         }
@@ -574,12 +583,28 @@ impl PlatformOutput {
             ime.as_ref().is_some_and(|next| {
                 previous.owner == next.owner
                     && previous.context_generation == next.context_generation
+                    // A retired token must not become an untokened stock interruption.
+                    // Keep the historical purpose policy for genuine untokened interrupts.
+                    && (previous.reset_request.is_none() || previous.purpose == next.purpose)
                     && previous.should_interrupt_composition
             })
         });
+        let previous_reset = self.ime.as_ref().and_then(|previous| {
+            ime.as_ref()
+                .filter(|next| {
+                    previous.owner == next.owner
+                        && previous.context_generation == next.context_generation
+                        && previous.purpose == next.purpose
+                })
+                .and(previous.reset_request)
+        });
         let mut ime = ime;
-        if keep_interrupt && let Some(ime) = &mut ime {
-            ime.should_interrupt_composition = true;
+        if let Some(ime) = &mut ime {
+            // A later actual interruption supersedes an earlier caret request in this context.
+            ime.reset_request = ime.reset_request.or(previous_reset);
+            if keep_interrupt || ime.reset_request.is_some() {
+                ime.should_interrupt_composition = true;
+            }
         }
         self.ime = ime;
         self.num_completed_passes += num_completed_passes;
@@ -1176,6 +1201,7 @@ mod tests {
             rect: Rect::from_min_size(pos2(0.0, 0.0), crate::vec2(100.0, 20.0)),
             cursor_rect: Rect::from_min_size(pos2(1.0, 2.0), crate::vec2(1.0, 16.0)),
             should_interrupt_composition: false,
+            reset_request: None,
             change_cause: ImeChangeCause::Other,
             surrounding_text: text,
         }

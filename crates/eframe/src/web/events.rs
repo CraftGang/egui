@@ -109,6 +109,16 @@ pub(crate) fn install_event_handlers(runner_ref: &WebRunner) -> Result<(), JsVal
     Ok(())
 }
 
+#[cfg(test)]
+pub(super) fn install_test_focus_and_keyboard(runner: &WebRunner) -> Result<(), JsValue> {
+    let document = web_sys::window().unwrap().document().unwrap();
+    let canvas = runner.try_lock().unwrap().canvas().clone();
+    install_blur_focus(runner, &document)?;
+    install_blur_focus(runner, &canvas)?;
+    install_keydown(runner, &canvas)?;
+    install_keyup(runner, &canvas)
+}
+
 fn install_blur_focus(runner_ref: &WebRunner, target: &EventTarget) -> Result<(), JsValue> {
     // NOTE: because of the text agent we sometime miss 'blur' events,
     // so we also poll the focus state each frame in `AppRunner::logic`.
@@ -322,6 +332,9 @@ pub(crate) fn on_keyup(event: web_sys::KeyboardEvent, runner: &mut AppRunner) {
             };
             should_stop_propagation &= (runner.web_options.should_stop_propagation)(&egui_event);
             runner.input.raw.events.push(egui_event);
+            // Retire authority only for the release actually queued. A keydown still in
+            // raw.events may not yet be present in ctx.keys_down and still needs its owner.
+            runner.input.keys.release_receipts_for(key);
         }
     }
 

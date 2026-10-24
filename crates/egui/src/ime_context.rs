@@ -70,6 +70,48 @@ use core::ops::Range;
 use crate::output::{IMESurroundingText, ImeChangeCause};
 use crate::{IMEPurpose, Id, ViewportId, ViewportIdMap};
 
+/// An opaque request for one viewport's native composition cancellation fence.
+///
+/// Created by [`crate::Context::request_ime_reset`] at the actual application interruption.
+/// A matching [`crate::Event::ImeResetCompleted`] is only an ordered admission boundary; it
+/// never edits a buffer or proves that an arbitrary later IME callback is semantically fresh.
+/// The application must bind its pending request to its actual target and caret and supersede
+/// it after another interruption, even when owner and context generation stay unchanged.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "serde", derive(serde::Deserialize, serde::Serialize))]
+pub struct ImeResetId {
+    viewport: ViewportId,
+    serial: u64,
+}
+
+impl ImeResetId {
+    pub(crate) fn allocate(viewport: ViewportId) -> Option<Self> {
+        use core::sync::atomic::{AtomicU64, Ordering};
+        static NEXT: AtomicU64 = AtomicU64::new(1);
+        // Process-unique even if a Context/Memory/State is replaced while a callback is queued.
+        // Exhaustion remains conservative instead of wrapping into a previously accepted token.
+        let serial = NEXT
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |next| {
+                next.checked_add(1)
+            })
+            .ok()?;
+        Some(Self { viewport, serial })
+    }
+
+    /// The viewport that requested this fence.
+    pub const fn viewport_id(self) -> ViewportId {
+        self.viewport
+    }
+
+    /// Integration token passed unchanged to the native request API.
+    ///
+    /// A host must retain this complete id and emit it only for the actual matching completion
+    /// from that same viewport/window. Calling the native API is not completion.
+    pub const fn as_u64(self) -> u64 {
+        self.serial
+    }
+}
+
 /// The immutable identity of one editable IME target.
 ///
 /// [`Self::owner`] must not contain the caret, selection, text, revision, rectangle, visual

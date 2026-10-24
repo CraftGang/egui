@@ -182,7 +182,8 @@ impl KeyResolver {
 mod tests {
     use super::*;
 
-    #[test]
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+    #[cfg_attr(not(target_arch = "wasm32"), test)]
     fn named_keys_are_not_text() {
         for key in [
             "AltGraph",
@@ -208,7 +209,8 @@ mod tests {
         }
     }
 
-    #[test]
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+    #[cfg_attr(not(target_arch = "wasm32"), test)]
     fn printable_keys_are_text() {
         for key in [
             "a", "A", "F", "1", " ", "/", "é", "ф", "Ж", "ש", "ب", "لا", "λ", "ß", "😀",
@@ -284,7 +286,8 @@ mod tests {
         }
     }
 
-    #[test]
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+    #[cfg_attr(not(target_arch = "wasm32"), test)]
     fn layout_map_decides_per_layout() {
         for (name, layout, latin) in LAYOUTS {
             assert_eq!(layout_is_latin(layout), Some(latin), "{name}");
@@ -296,7 +299,8 @@ mod tests {
         assert_eq!(layout_is_latin([]), None);
     }
 
-    #[test]
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+    #[cfg_attr(not(target_arch = "wasm32"), test)]
     fn typed_letters_decide_without_layout_map() {
         // A word typed on the layout, as indices into its table.
         let word = [5, 14, 17, 12, 0]; // KeyF KeyO KeyR KeyM KeyA
@@ -311,7 +315,8 @@ mod tests {
         }
     }
 
-    #[test]
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+    #[cfg_attr(not(target_arch = "wasm32"), test)]
     fn hebrew_shortcut_on_punctuation_letter_key() {
         let mut resolver = KeyResolver::default();
         resolver.set_layout_map(HEBREW);
@@ -326,7 +331,8 @@ mod tests {
         );
     }
 
-    #[test]
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+    #[cfg_attr(not(target_arch = "wasm32"), test)]
     fn switching_layouts_without_layout_map() {
         let mut resolver = KeyResolver::default();
         let type_key = |resolver: &mut KeyResolver, key: &str, code: &str| {
@@ -356,7 +362,8 @@ mod tests {
         assert!(resolver.is_latin());
     }
 
-    #[test]
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+    #[cfg_attr(not(target_arch = "wasm32"), test)]
     fn contradicting_press_asks_for_layout_map() {
         let mut resolver = KeyResolver::default();
         resolver.set_layout_map(DVORAK);
@@ -367,7 +374,8 @@ mod tests {
         assert!(resolver.is_latin());
     }
 
-    #[test]
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+    #[cfg_attr(not(target_arch = "wasm32"), test)]
     fn key_up_releases_the_key_pressed() {
         let mut resolver = KeyResolver::default();
         resolver.set_layout_map(HEBREW);

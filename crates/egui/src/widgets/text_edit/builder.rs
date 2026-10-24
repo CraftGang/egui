@@ -1124,6 +1124,7 @@ impl<'t> TextEdit<'t> {
                                 rect: to_global * inner_rect,
                                 cursor_rect: to_global * primary_cursor_rect,
                                 should_interrupt_composition: false,
+                                reset_request: None,
                                 change_cause,
                                 surrounding_text,
                             });

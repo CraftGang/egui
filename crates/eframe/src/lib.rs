@@ -171,6 +171,10 @@ pub(crate) mod stopwatch;
 #[cfg(any(target_arch = "wasm32", test))]
 mod web_keys;
 
+/// Position-only key for the web hidden text agent. Compiled for native tests too.
+#[cfg(any(target_arch = "wasm32", test))]
+mod web_caret_position;
+
 // ----------------------------------------------------------------------------
 // When compiling for web
 

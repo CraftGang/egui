@@ -1565,8 +1565,10 @@ impl Context {
             self.check_for_id_clash(w.id, w.rect, "widget");
         }
 
-        #[allow(clippy::allow_attributes, clippy::let_and_return)]
-        let res = self.get_response(w);
+        // Response inspection is also used to choose styling before a widget processes input.
+        // Apply click-away focus changes only when the widget is actually registered, so a
+        // TextEdit can preserve its selection for an action later in this pass (egui#8763).
+        let res = self.get_response_with_focus_policy(w, true);
 
         #[cfg(debug_assertions)]
         if res.contains_pointer() {
@@ -1728,6 +1730,14 @@ impl Context {
 
     /// Do all interaction for an existing widget, without (re-)registering it.
     pub(crate) fn get_response(&self, widget_rect: WidgetRect) -> Response {
+        self.get_response_with_focus_policy(widget_rect, false)
+    }
+
+    fn get_response_with_focus_policy(
+        &self,
+        widget_rect: WidgetRect,
+        apply_click_away: bool,
+    ) -> Response {
         use response::Flags;
 
         let WidgetRect {
@@ -1820,14 +1830,9 @@ impl Context {
             }
 
             let clicked = Some(id) == viewport.interact_widgets.clicked;
-            let mut any_press = false;
-
             for pointer_event in &input.pointer.pointer_events {
                 match pointer_event {
-                    PointerEvent::Moved(_) => {}
-                    PointerEvent::Pressed { .. } => {
-                        any_press = true;
-                    }
+                    PointerEvent::Moved(_) | PointerEvent::Pressed { .. } => {}
                     PointerEvent::Released { click, .. } => {
                         if enabled && sense.senses_click() && clicked && click.is_some() {
                             res.flags.set(Flags::CLICKED, true);
@@ -1857,15 +1862,15 @@ impl Context {
                 res.flags.set(Flags::HOVERED, false);
             }
 
-            let should_surrender_focus = match memory.options.input_options.surrender_focus_on {
-                SurrenderFocusOn::Presses => any_press,
-                SurrenderFocusOn::Clicks => input.pointer.any_click(),
-                SurrenderFocusOn::Never => false,
-            };
-
-            let pointer_clicked_elsewhere = should_surrender_focus && !res.hovered();
-            if pointer_clicked_elsewhere && memory.has_focus(id) {
-                memory.surrender_focus(id);
+            if apply_click_away && !res.hovered() {
+                let triggered = match memory.options.input_options.surrender_focus_on {
+                    SurrenderFocusOn::Presses => input.pointer.any_pressed(),
+                    SurrenderFocusOn::Clicks => input.pointer.any_click(),
+                    SurrenderFocusOn::Never => false,
+                };
+                if triggered && memory.has_focus(id) {
+                    memory.surrender_focus(id);
+                }
             }
         });
 
@@ -3332,9 +3337,15 @@ impl ContextImpl {
             .map(|(&id, viewport)| {
                 let parent = *self.viewport_parents.entry(id).or_default();
                 let commands = if is_last {
-                    // Let the primary immediate viewport handle the commands of its children too.
-                    // This can make things easier for the backend, as otherwise we may get commands
-                    // that affect a viewport while its egui logic is running.
+                    // The outermost pass handles every remaining command, including deferred
+                    // viewports and commands explicitly sent to another viewport.
+                    core::mem::take(&mut viewport.commands)
+                } else if id == ended_viewport_id {
+                    // Return the immediate viewport's own commands with its `FullOutput`.
+                    // Its renderer must be able to apply ordering-sensitive commands (such as
+                    // `IMEAllowed`) before handling that viewport's platform output. Do not take
+                    // the parent's or a sibling's queue: those commands still belong to their
+                    // own passes, and taking them here would duplicate or misroute them.
                     core::mem::take(&mut viewport.commands)
                 } else {
                     vec![]

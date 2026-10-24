@@ -1322,6 +1322,7 @@ dependencies = [
  "profiling",
  "ron",
  "serde",
+ "skrifa",
  "smallvec",
  "unicode-segmentation",
  "web-sys",
@@ -1355,15 +1356,18 @@ dependencies = [
  "bytemuck",
  "document-features",
  "egui",
+ "image",
  "log",
  "objc2 0.6.4",
  "objc2-app-kit 0.3.2",
  "objc2-foundation 0.3.2",
  "objc2-ui-kit 0.3.2",
+ "parking_lot",
  "profiling",
  "raw-window-handle",
  "serde",
  "smithay-clipboard",
+ "softbuffer",
  "wayland-cursor",
  "web-time",
  "webbrowser",
@@ -4652,6 +4656,34 @@ dependencies = [
 ]
 
 [[package]]
+name = "softbuffer"
+version = "0.4.8"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "aac18da81ebbf05109ab275b157c22a653bb3c12cf884450179942f81bcbf6c3"
+dependencies = [
+ "bytemuck",
+ "fastrand",
+ "js-sys",
+ "memmap2",
+ "ndk",
+ "objc2 0.6.4",
+ "objc2-core-foundation",
+ "objc2-core-graphics",
+ "objc2-foundation 0.3.2",
+ "objc2-quartz-core 0.3.2",
+ "raw-window-handle",
+ "redox_syscall 0.5.18",
+ "rustix 1.1.4",
+ "tracing",
+ "wasm-bindgen",
+ "wayland-backend",
+ "wayland-client",
+ "wayland-sys",
+ "web-sys",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
 name = "spirv"
 version = "0.4.0+sdk-1.4.341.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6030,7 +6062,7 @@ checksum = "589f6da84c646204747d1270a2a5661ea66ed1cced2631d546fdfb155959f9ec"
 [[package]]
 name = "winit"
 version = "0.30.13"
-source = "git+https://github.com/aiongg/winit?branch=craft%2F0.30.13-lang#8b35388bd719e8cc86a95971ba0bc026c9a8f058"
+source = "git+https://github.com/storytold/winit.git?rev=ae48c756a3b81125eb796c0cc6dccf60990d1181#ae48c756a3b81125eb796c0cc6dccf60990d1181"
 dependencies = [
  "ahash",
  "android-activity",

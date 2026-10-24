@@ -558,6 +558,25 @@ impl ScrollArea {
     ///
     /// Positive offset means scrolling down/right.
     ///
+    /// An explicit offset takes precedence over momentum and animated scroll targets
+    /// that existed before this frame: on each supplied axis the velocity and any
+    /// previous `scroll_to_*` animation are cleared, and the offset is not advanced by
+    /// the previous frame's physics. Actions that happen later in the same frame (a
+    /// wheel event, a scroll-bar drag, `scroll_to_*`, or `scroll_with_delta`) still
+    /// apply on top of it, because they are newer input. Animated targets started in the
+    /// same frame are queued normally, but a subsequent frame's explicit offset will
+    /// cancel them. A continuing drag does not modify an axis with an explicit offset.
+    /// Supplying an offset every frame therefore effectively disables kinetic scrolling
+    /// and animation on those axes. An explicit offset also counts as a manual
+    /// reposition for `stick_to_end`: the axis sticks again only if the requested
+    /// position is at the end.
+    ///
+    /// The offset is used for this frame's layout as-is. It is clamped to the current
+    /// content bounds when stored at the end of the frame, so an out-of-range request
+    /// paints at the requested position for that frame while the next frame starts
+    /// from the clamped edge. Non-finite values (NaN or infinity) are ignored for that
+    /// axis.
+    ///
     /// See also: [`Self::vertical_scroll_offset`], [`Self::horizontal_scroll_offset`],
     /// [`Ui::scroll_to_cursor`](crate::ui::Ui::scroll_to_cursor) and
     /// [`Response::scroll_to_me`](crate::Response::scroll_to_me)
@@ -788,6 +807,12 @@ struct Prepared {
 
     /// Per axis. Bounds are from last frame.
     axis_physics: [AxisPhysics; 2],
+
+    /// Per axis, the caller-provided offset for this frame, if any.
+    ///
+    /// Carried into [`Prepared::end`] so later phases (stick-to-end, drag-release
+    /// momentum) don't override an explicitly requested position.
+    requested_offset: [Option<f32>; 2],
 }
 
 impl ScrollArea {
@@ -822,8 +847,19 @@ impl ScrollArea {
         );
         let mut state = State::load(&ctx, id).unwrap_or_default();
 
-        state.offset.x = offset_x.unwrap_or(state.offset.x);
-        state.offset.y = offset_y.unwrap_or(state.offset.y);
+        // Non-finite positions would poison layout and the stored state, so ignore them.
+        let requested_offset =
+            [offset_x, offset_y].map(|offset| offset.filter(|offset| offset.is_finite()));
+        for (axis, offset) in requested_offset.iter().enumerate() {
+            if let Some(offset) = offset {
+                // A caller-provided position supersedes previous motion on this axis.
+                state.offset[axis] = *offset;
+                state.vel[axis] = 0.0;
+                state.offset_target[axis] = None;
+                state.scroll_stuck_to_end[axis] = false;
+                state.bounced_this_momentum[axis] = false;
+            }
+        }
 
         let show_bars: Vec2b = match scroll_bar_visibility {
             ScrollBarVisibility::AlwaysHidden => Vec2b::FALSE,
@@ -972,7 +1008,10 @@ impl ScrollArea {
         {
             let pointer_delta = ui.input(|input| input.pointer.delta());
             for d in 0..2 {
-                if direction_enabled[d] {
+                // An explicit offset wins over a continuing drag on that axis: the drag
+                // physics uses last frame's bounds, which may be stale after a
+                // zoom/reflow, and a caller controlling the offset expects it as-is.
+                if direction_enabled[d] && requested_offset[d].is_none() {
                     let physics = &axis_physics[d];
                     // Offset has an inverted coordinate system compared to the pointer:
                     state.offset[d] = physics.drag(state.offset[d], -pointer_delta[d]);
@@ -987,9 +1026,17 @@ impl ScrollArea {
                 .as_ref()
                 .is_some_and(|response| response.drag_stopped())
             {
-                // Offset has an inverted coordinate system compared to the pointer:
-                state.vel =
-                    -(direction_enabled.to_vec2() * ui.input(|input| input.pointer.velocity()));
+                let pointer_velocity = ui.input(|input| input.pointer.velocity());
+                for d in 0..2 {
+                    // Offset has an inverted coordinate system compared to the pointer.
+                    // Don't re-inject the release velocity on an explicitly positioned
+                    // axis, or the next frame would coast away from that position.
+                    state.vel[d] = if direction_enabled[d] && requested_offset[d].is_none() {
+                        -pointer_velocity[d]
+                    } else {
+                        0.0
+                    };
+                }
             }
 
             // While the fingers are still on the trackpad,
@@ -1000,6 +1047,16 @@ impl ScrollArea {
             let hold_overscroll = fingers_on_trackpad && ui.rect_contains_pointer(inner_rect);
 
             for d in 0..2 {
+                // Bounds here still describe last frame. A zoom/reflow may request an offset
+                // beyond those old bounds that is valid for the content we are about to draw.
+                // Skip physics and validate the offset against the current content in `end`,
+                // without springing back or reviving the previous gesture's momentum. The
+                // begin pass paints at the request; `end` clamps the stored state, so an
+                // out-of-range request can show a one-frame paint/state mismatch (this
+                // predates explicit-offset handling and is not resolved here).
+                if requested_offset[d].is_some() {
+                    continue;
+                }
                 let physics = &axis_physics[d];
                 if physics.step(&mut state.offset[d], &mut state.vel[d], dt, hold_overscroll) {
                     ctx.request_repaint();
@@ -1065,6 +1122,7 @@ impl ScrollArea {
             rubber_banding,
             has_scrolling_ancestor,
             axis_physics,
+            requested_offset,
         }
     }
 
@@ -1196,11 +1254,15 @@ impl Prepared {
             mut rubber_banding,
             has_scrolling_ancestor,
             axis_physics,
+            requested_offset,
         } = self;
 
         let content_size = content_ui.min_size();
 
-        let mut had_explicit_scroll_adjustment = Vec2b::FALSE;
+        // An explicit offset counts as an adjustment, so `stick_to_end` below cannot
+        // pull the stored position away from it.
+        let mut had_explicit_scroll_adjustment =
+            Vec2b::new(requested_offset[0].is_some(), requested_offset[1].is_some());
 
         for d in 0..2 {
             // We always take both scroll targets regardless of which scroll axes are enabled. This
@@ -1806,7 +1868,10 @@ fn paint_fade_areas_impl(ui: &Ui, inner_rect: Rect, content_size: Vec2, offset: 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{RawInput, style::ScrollStyle};
+    use crate::{
+        Event, Modifiers, MouseWheelSource, MouseWheelUnit, PointerButton, RawInput, TouchPhase,
+        style::ScrollStyle,
+    };
 
     #[test]
     fn clamped_offset() {
@@ -1817,6 +1882,425 @@ mod tests {
         };
         assert_eq!(state.clamped_offset(), Vec2::new(0.0, 100.0));
         assert_eq!(state.overscroll(), Vec2::new(-10.0, 50.0));
+    }
+
+    fn frame_input(time: f64, events: Vec<Event>) -> RawInput {
+        RawInput {
+            time: Some(time),
+            screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(400.0, 400.0))),
+            events,
+            ..Default::default()
+        }
+    }
+
+    /// Run one frame of a 200×200 scroll area that fills `size` with content.
+    fn run_scroll_frame(
+        ctx: &Context,
+        input: RawInput,
+        size: Vec2,
+        mut configure: impl FnMut(ScrollArea) -> ScrollArea,
+        mut add_contents: impl FnMut(&mut Ui, Rect),
+    ) -> (Id, State, Vec2) {
+        let mut result = None;
+        ctx.run_ui(input, |ui| {
+            ui.spacing_mut().scroll.kinetic.rubber_band = true;
+            let scroll = configure(
+                ScrollArea::both()
+                    .id_salt("explicit-offset")
+                    .auto_shrink(false)
+                    .max_width(200.0)
+                    .max_height(200.0),
+            );
+            let out = scroll.show_viewport(ui, |ui, viewport| {
+                ui.set_min_size(size);
+                add_contents(ui, viewport);
+                viewport.min.to_vec2()
+            });
+            result = Some((out.id, out.state, out.inner));
+        })
+        .drop_without_applying_deltas();
+        result.expect("one UI pass")
+    }
+
+    fn explicit_offset_frame(ctx: &Context, offset: Option<Vec2>, size: Vec2) -> (Id, State, Vec2) {
+        run_scroll_frame(
+            ctx,
+            frame_input(0.0, vec![]),
+            size,
+            |scroll| match offset {
+                Some(offset) => scroll.scroll_offset(offset),
+                None => scroll,
+            },
+            |_, _| {},
+        )
+    }
+
+    fn pointer_frame(time: f64, pos: Pos2, pressed: Option<bool>) -> RawInput {
+        let event = match pressed {
+            Some(pressed) => Event::PointerButton {
+                pos,
+                button: PointerButton::Primary,
+                pressed,
+                modifiers: Modifiers::NONE,
+            },
+            None => Event::PointerMoved(pos),
+        };
+        frame_input(time, vec![event])
+    }
+
+    fn drag_frame(ctx: &Context, input: RawInput, size: Vec2) -> (Id, State, Vec2) {
+        run_scroll_frame(
+            ctx,
+            input,
+            size,
+            |scroll| scroll.scroll_source(ScrollSource::DRAG),
+            |_, _| {},
+        )
+    }
+
+    #[test]
+    fn explicit_offset_can_follow_content_growth_without_a_spring_back() {
+        let ctx = Context::default();
+        explicit_offset_frame(&ctx, None, vec2(1000.0, 1000.0));
+        let desired = vec2(1800.0, 1800.0);
+        let (_, state, painted) = explicit_offset_frame(&ctx, Some(desired), vec2(3000.0, 3000.0));
+        assert_eq!(painted, desired);
+        assert_eq!(
+            state.unclamped_offset(),
+            desired,
+            "last frame's smaller bounds must not spring back a new programmatic offset"
+        );
+        for _ in 0..3 {
+            let (_, state, painted) = explicit_offset_frame(&ctx, None, vec2(3000.0, 3000.0));
+            assert_eq!(state.unclamped_offset(), desired);
+            assert_eq!(painted, desired);
+        }
+    }
+
+    #[test]
+    fn explicit_offset_cancels_previous_momentum() {
+        let ctx = Context::default();
+        let (id, mut state, _) = explicit_offset_frame(&ctx, None, vec2(3000.0, 3000.0));
+        state.offset = vec2(500.0, 500.0);
+        state.vel = vec2(1000.0, 1000.0);
+        state.store(&ctx, id);
+        let desired = vec2(800.0, 800.0);
+        let (_, state, painted) = explicit_offset_frame(&ctx, Some(desired), vec2(3000.0, 3000.0));
+        assert_eq!(painted, desired);
+        assert_eq!(state.unclamped_offset(), desired);
+        assert_eq!(state.velocity(), Vec2::ZERO);
+        let (_, state, painted) = explicit_offset_frame(&ctx, None, vec2(3000.0, 3000.0));
+        assert_eq!(painted, desired);
+        assert_eq!(state.unclamped_offset(), desired);
+    }
+
+    #[test]
+    fn explicit_offset_cancels_previous_scroll_target() {
+        let ctx = Context::default();
+        let (id, mut state, _) = explicit_offset_frame(&ctx, None, vec2(3000.0, 3000.0));
+        state.offset_target[1] = Some(ScrollingToTarget {
+            animation_time_span: (0.0, 1.0),
+            target_offset: 2000.0,
+        });
+        state.store(&ctx, id);
+        let desired = vec2(800.0, 800.0);
+        let (_, state, painted) = explicit_offset_frame(&ctx, Some(desired), vec2(3000.0, 3000.0));
+        assert_eq!(painted, desired);
+        assert_eq!(state.unclamped_offset(), desired);
+        assert!(state.offset_target.iter().all(Option::is_none));
+    }
+
+    #[test]
+    fn explicit_horizontal_offset_keeps_vertical_momentum() {
+        let ctx = Context::default();
+        let (id, mut state, _) = explicit_offset_frame(&ctx, None, vec2(3000.0, 3000.0));
+        state.offset = vec2(500.0, 500.0);
+        state.vel = vec2(1000.0, 1000.0);
+        state.store(&ctx, id);
+        let mut result = None;
+        ctx.run_ui(
+            RawInput {
+                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(400.0, 400.0))),
+                ..Default::default()
+            },
+            |ui| {
+                let out = ScrollArea::both()
+                    .id_salt("explicit-offset")
+                    .auto_shrink(false)
+                    .max_width(200.0)
+                    .max_height(200.0)
+                    .horizontal_scroll_offset(800.0)
+                    .show(ui, |ui| ui.set_min_size(vec2(3000.0, 3000.0)));
+                result = Some(out.state);
+            },
+        )
+        .drop_without_applying_deltas();
+        let state = result.expect("one UI pass");
+        assert_eq!(state.unclamped_offset().x, 800.0);
+        assert_eq!(state.velocity().x, 0.0);
+        assert!(state.unclamped_offset().y > 500.0);
+        assert!(state.velocity().y > 0.0);
+    }
+
+    #[test]
+    fn explicit_offset_escapes_stick_to_end_per_axis() {
+        let ctx = Context::default();
+        let size = vec2(3000.0, 3000.0);
+        let stick = |scroll: ScrollArea| scroll.stick_to_bottom(true).stick_to_right(true);
+
+        let (_, state, _) =
+            run_scroll_frame(&ctx, frame_input(0.0, vec![]), size, stick, |_, _| {});
+        assert_eq!(state.unclamped_offset(), vec2(2800.0, 2800.0));
+
+        // Explicitly moving the horizontal axis away from the end must win over
+        // `stick_to_right`, while the untouched vertical axis stays stuck.
+        let (_, state, painted) = run_scroll_frame(
+            &ctx,
+            frame_input(0.1, vec![]),
+            size,
+            |scroll| stick(scroll).horizontal_scroll_offset(800.0),
+            |_, _| {},
+        );
+        assert_eq!(painted, vec2(800.0, 2800.0));
+        assert_eq!(state.unclamped_offset(), vec2(800.0, 2800.0));
+        assert!(!state.scroll_stuck_to_end[0]);
+        assert!(state.scroll_stuck_to_end[1]);
+
+        // The escape must persist on following frames, still without affecting vertical stickiness.
+        let (_, state, _) =
+            run_scroll_frame(&ctx, frame_input(0.2, vec![]), size, stick, |_, _| {});
+        assert_eq!(state.unclamped_offset(), vec2(800.0, 2800.0));
+
+        // And the vertical axis can escape independently too.
+        let (_, state, painted) = run_scroll_frame(
+            &ctx,
+            frame_input(0.3, vec![]),
+            size,
+            |scroll| stick(scroll).vertical_scroll_offset(800.0),
+            |_, _| {},
+        );
+        assert_eq!(painted, vec2(800.0, 800.0));
+        assert_eq!(state.unclamped_offset(), vec2(800.0, 800.0));
+        assert!(!state.scroll_stuck_to_end.any());
+    }
+
+    #[test]
+    fn explicit_horizontal_offset_keeps_vertical_scroll_target() {
+        let ctx = Context::default();
+        let size = vec2(3000.0, 3000.0);
+        let (id, mut state, _) = explicit_offset_frame(&ctx, None, size);
+        state.offset = vec2(500.0, 500.0);
+        state.offset_target = [
+            Some(ScrollingToTarget {
+                animation_time_span: (0.0, 1.0),
+                target_offset: 2000.0,
+            }),
+            Some(ScrollingToTarget {
+                animation_time_span: (0.0, 1.0),
+                target_offset: 2000.0,
+            }),
+        ];
+        state.store(&ctx, id);
+
+        let (_, state, _) = run_scroll_frame(
+            &ctx,
+            frame_input(0.1, vec![]),
+            size,
+            |scroll| scroll.horizontal_scroll_offset(800.0),
+            |_, _| {},
+        );
+        assert_eq!(state.unclamped_offset().x, 800.0);
+        assert!(state.offset_target[0].is_none());
+        assert!(
+            state.offset_target[1].is_some(),
+            "the untouched axis keeps its animation"
+        );
+        assert!(state.unclamped_offset().y > 500.0);
+        assert!(!state.scroll_stuck_to_end.any());
+    }
+
+    #[test]
+    fn explicit_offset_uses_current_bounds_while_dragging() {
+        let ctx = Context::default();
+        let pointer = pos2(100.0, 100.0);
+        let small = vec2(1000.0, 1000.0); // old max offset: 800
+        let grown = vec2(2000.0, 2000.0); // new max offset: 1800
+
+        drag_frame(&ctx, pointer_frame(0.0, pointer, None), small);
+        // The first frame learns content bounds; the next registers the drag hit area.
+        drag_frame(&ctx, pointer_frame(0.01, pointer, None), small);
+        drag_frame(&ctx, pointer_frame(0.02, pointer, Some(true)), small);
+        drag_frame(&ctx, pointer_frame(0.04, pos2(90.0, 90.0), None), small);
+
+        // The vertical explicit offset is valid for the grown content but beyond the
+        // old bounds. It must be used exactly, while the horizontal drag still moves.
+        let (_, state, painted) = run_scroll_frame(
+            &ctx,
+            pointer_frame(0.06, pos2(80.0, 80.0), None),
+            grown,
+            |scroll| {
+                scroll
+                    .scroll_source(ScrollSource::DRAG)
+                    .vertical_scroll_offset(900.0)
+            },
+            |_, _| {},
+        );
+        assert_eq!(painted.y, 900.0);
+        assert_eq!(state.unclamped_offset().y, 900.0);
+        assert!(
+            state.unclamped_offset().x > 0.0,
+            "the unrequested axis still follows the drag"
+        );
+    }
+
+    #[test]
+    fn drag_release_does_not_revive_velocity_on_explicit_axis() {
+        let ctx = Context::default();
+        let size = vec2(3000.0, 3000.0);
+        let pointer = pos2(100.0, 100.0);
+
+        drag_frame(&ctx, pointer_frame(0.0, pointer, None), size);
+        // The first frame learns content bounds; the next registers the drag hit area.
+        drag_frame(&ctx, pointer_frame(0.01, pointer, None), size);
+        drag_frame(&ctx, pointer_frame(0.02, pointer, Some(true)), size);
+        drag_frame(&ctx, pointer_frame(0.04, pos2(90.0, 80.0), None), size);
+        drag_frame(&ctx, pointer_frame(0.06, pos2(80.0, 60.0), None), size);
+        drag_frame(&ctx, pointer_frame(0.08, pos2(70.0, 40.0), None), size);
+
+        let (_, released, _) = run_scroll_frame(
+            &ctx,
+            pointer_frame(0.10, pos2(70.0, 40.0), Some(false)),
+            size,
+            |scroll| {
+                scroll
+                    .scroll_source(ScrollSource::DRAG)
+                    .horizontal_scroll_offset(800.0)
+            },
+            |_, _| {},
+        );
+        assert_eq!(released.unclamped_offset().x, 800.0);
+        assert_eq!(
+            released.velocity().x,
+            0.0,
+            "release velocity must not be re-injected on the explicitly positioned axis"
+        );
+        assert!(
+            released.velocity().y > 0.0,
+            "the unrequested axis still inherits the release velocity"
+        );
+
+        let (_, next, _) = run_scroll_frame(
+            &ctx,
+            frame_input(0.12, vec![]),
+            size,
+            |scroll| scroll.scroll_source(ScrollSource::DRAG),
+            |_, _| {},
+        );
+        assert_eq!(next.unclamped_offset().x, 800.0);
+        assert!(next.unclamped_offset().y > released.unclamped_offset().y);
+    }
+
+    #[test]
+    fn explicit_offset_allows_same_frame_scroll_target() {
+        let ctx = Context::default();
+        let size = vec2(3000.0, 3000.0);
+        explicit_offset_frame(&ctx, None, size);
+
+        let (_, state, _) = run_scroll_frame(
+            &ctx,
+            frame_input(0.1, vec![]),
+            size,
+            |scroll| scroll.scroll_offset(vec2(800.0, 800.0)).animated(false),
+            |ui, _| {
+                ui.scroll_to_rect(
+                    Rect::from_min_size(pos2(0.0, 1000.0), vec2(10.0, 10.0)),
+                    None,
+                );
+            },
+        );
+        assert_eq!(state.unclamped_offset().x, 800.0);
+        assert!(
+            state.unclamped_offset().y > 1500.0,
+            "a scroll target created in the same frame still applies: {}",
+            state.unclamped_offset().y
+        );
+        assert!(state.offset_target.iter().all(Option::is_none));
+    }
+
+    #[test]
+    fn explicit_offset_allows_same_frame_scroll_delta() {
+        let ctx = Context::default();
+        let size = vec2(3000.0, 3000.0);
+        explicit_offset_frame(&ctx, None, size);
+
+        let (_, state, _) = run_scroll_frame(
+            &ctx,
+            frame_input(0.1, vec![]),
+            size,
+            |scroll| scroll.scroll_offset(vec2(800.0, 800.0)).animated(false),
+            |ui, _| ui.scroll_with_delta(vec2(0.0, -100.0)),
+        );
+        assert_eq!(state.unclamped_offset(), vec2(800.0, 900.0));
+    }
+
+    #[test]
+    fn explicit_offset_allows_same_frame_wheel() {
+        let ctx = Context::default();
+        let size = vec2(3000.0, 3000.0);
+        explicit_offset_frame(&ctx, None, size);
+
+        let wheel = Event::MouseWheel {
+            unit: MouseWheelUnit::Point,
+            delta: vec2(0.0, -50.0),
+            phase: TouchPhase::Move,
+            source: MouseWheelSource::Unknown,
+            modifiers: Modifiers::NONE,
+        };
+        let input = frame_input(0.1, vec![Event::PointerMoved(pos2(50.0, 50.0)), wheel]);
+        let (_, state, _) = run_scroll_frame(
+            &ctx,
+            input,
+            size,
+            |scroll| scroll.scroll_offset(vec2(800.0, 800.0)),
+            |_, _| {},
+        );
+        assert_eq!(state.unclamped_offset().x, 800.0);
+        assert!(
+            state.unclamped_offset().y > 800.0,
+            "a wheel event in the same frame still scrolls: {}",
+            state.unclamped_offset().y
+        );
+    }
+
+    #[test]
+    fn out_of_range_explicit_offset_clamps_the_stored_state() {
+        let ctx = Context::default();
+        let (_, state, _) =
+            explicit_offset_frame(&ctx, Some(vec2(2500.0, 2500.0)), vec2(3000.0, 3000.0));
+        assert_eq!(state.unclamped_offset(), vec2(2500.0, 2500.0));
+
+        // Content shrinks under an over-large request. The begin pass paints at the
+        // request (pre-existing begin/end mismatch), but the stored state is clamped to
+        // the new bounds and classified per axis.
+        let (_, state, painted) =
+            explicit_offset_frame(&ctx, Some(vec2(2500.0, -100.0)), vec2(500.0, 500.0));
+        assert_eq!(painted, vec2(2500.0, -100.0));
+        assert_eq!(state.unclamped_offset(), vec2(300.0, 0.0));
+        assert_eq!(state.overscroll(), Vec2::ZERO);
+        assert!(state.scroll_stuck_to_end[0]);
+        assert!(!state.scroll_stuck_to_end[1]);
+    }
+
+    #[test]
+    fn nonfinite_explicit_offset_is_ignored_per_axis() {
+        let ctx = Context::default();
+        let size = vec2(3000.0, 3000.0);
+        explicit_offset_frame(&ctx, Some(vec2(800.0, 800.0)), size);
+
+        let (_, state, painted) = explicit_offset_frame(&ctx, Some(vec2(f32::NAN, 700.0)), size);
+        assert_eq!(painted, vec2(800.0, 700.0));
+        assert_eq!(state.unclamped_offset(), vec2(800.0, 700.0));
+        assert!(state.unclamped_offset().is_finite());
     }
 
     /// Shows a vertical scroll area with too much content,

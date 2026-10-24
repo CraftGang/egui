@@ -405,6 +405,7 @@ pub mod gui_zoom;
 mod hit_test;
 mod id;
 mod id_salt;
+pub mod ime_context;
 mod input_state;
 mod interaction;
 pub mod introspection;
@@ -502,8 +503,8 @@ pub use self::{
             TouchPhase, ViewportEvent, ViewportInfo,
         },
         output::{
-            self, CursorIcon, CustomCursorImage, FullOutput, LogicOutput, OpenUrl, OutputCommand,
-            PlatformOutput, UserAttentionType, WidgetInfo, role_description,
+            self, CursorIcon, CustomCursorImage, FullOutput, ImeChangeCause, LogicOutput, OpenUrl,
+            OutputCommand, PlatformOutput, UserAttentionType, WidgetInfo, role_description,
         },
     },
     drag_and_drop::DragAndDrop,
@@ -511,6 +512,10 @@ pub use self::{
     grid::Grid,
     id::{Id, IdMap, IdSet},
     id_salt::{AsIdSalt, IdSalt, IdSaltMap, IdSaltSet},
+    ime_context::{
+        CommittedText, ImeContextTracker, ImeContextUpdate, ImeMutationStamp, ImeObservation,
+        ImeTarget,
+    },
     input_state::{InputOptions, InputState, MultiTouchInfo, PointerState, SurrenderFocusOn},
     layers::{LayerId, Order},
     layout::Layout,

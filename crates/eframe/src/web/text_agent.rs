@@ -6,6 +6,10 @@ use std::rc::Rc;
 
 use wasm_bindgen::prelude::*;
 
+use crate::web_caret_position::{
+    CanvasMetrics, CaretGeometry, CaretPositionKey, CaretPositionTracker,
+};
+
 use super::{AppRunner, WebRunner};
 
 pub struct TextAgent {
@@ -213,6 +217,9 @@ struct InputState {
     input: web_sys::HtmlInputElement,
     last_text: String,
     ime_output: Option<egui::output::IMEOutput>,
+
+    /// The last caret position written to the DOM, independent of text/owner/selection.
+    caret_position: CaretPositionTracker,
     keydown_special_case: KeydownSpecialCase,
 }
 
@@ -251,6 +258,7 @@ impl InputState {
             input,
             last_text: String::new(),
             ime_output: None,
+            caret_position: CaretPositionTracker::default(),
             keydown_special_case: KeydownSpecialCase::None,
         }
     }
@@ -261,13 +269,31 @@ impl InputState {
         canvas: &web_sys::HtmlCanvasElement,
         zoom_factor: f32,
     ) -> Result<(), JsValue> {
-        // Don't move the text agent unless the position actually changed:
-        if self.ime_output == ime {
+        let native_ppp = super::native_pixels_per_point();
+        let canvas_metrics = CanvasMetrics {
+            width: canvas.width(),
+            height: canvas.height(),
+            offset_left: canvas.offset_left(),
+            offset_top: canvas.offset_top(),
+            native_pixels_per_point: native_ppp,
+        };
+        let geometry = ime
+            .as_ref()
+            .map(|ime| CaretGeometry::from_ime(ime, canvas_metrics, zoom_factor));
+        let position_to_write = self
+            .caret_position
+            .update(geometry.map(CaretPositionKey::new));
+
+        // Keep the complete descriptor for IME lifecycle decisions, independently of whether
+        // this pass needs to move the hidden input. A text/selection/owner change alone does
+        // not touch the DOM style.
+        self.ime_output = ime;
+        if position_to_write.is_none() {
             return Ok(());
         }
-        self.ime_output = ime;
-
-        let Some(ime) = ime else { return Ok(()) };
+        let Some(ime) = self.ime_output.as_ref() else {
+            return Ok(());
+        };
 
         // NOTE: we don't set the input's `type` to `password` based on
         // `ime.purpose`, because that would confuse some password managers.
@@ -275,7 +301,6 @@ impl InputState {
         // letter typed in the password field is the password.
 
         let style = self.input.style();
-        let native_ppp = super::native_pixels_per_point();
 
         // The input is a sibling of the canvas (see `attach`), so we position
         // it relative to the same containing block using the canvas offset.

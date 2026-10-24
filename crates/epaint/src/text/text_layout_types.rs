@@ -1580,7 +1580,13 @@ impl Galley {
     }
 
     pub fn clamp_cursor(&self, cursor: &CCursor) -> CCursor {
-        self.cursor_from_layout(self.layout_from_cursor(*cursor))
+        let mut clamped = self.cursor_from_layout(self.layout_from_cursor(*cursor));
+        if clamped.index == cursor.index {
+            // LayoutCursor has no bidi affinity. Keep the run/row chosen by a valid
+            // character cursor when clamping persisted TextEdit state between passes.
+            clamped.prefer_next_row = cursor.prefer_next_row;
+        }
+        clamped
     }
 
     pub fn cursor_up_one_row(

@@ -141,7 +141,7 @@ links = ["egui-winit/links"]
 
 ## Enables the `clipboard` feature on `egui-winit`, allowing to cut/copy/paste to OS clipboard.
 ## If disabled a clipboard will be simulated so you can still copy/paste within the egui app.
-clipboard = ["egui-winit/clipboard"]
+clipboard = ["egui-winit/clipboard", "egui-winit/clipboard-image"]
 
 [dependencies]
 egui = { workspace = true, default-features = false, features = ["bytemuck"] }

@@ -643,6 +643,106 @@ mod tests {
         );
     }
 
+    #[test]
+    fn clamping_preserves_bidi_and_wrapped_row_affinity() {
+        for width in [f32::INFINITY, 45.0] {
+            let galley = layout("abc אבג def\nאבג abc", TextDirection::Auto, width);
+            if width.is_finite() {
+                assert!(
+                    galley.rows.len() > 2,
+                    "exercise soft wraps as well as the newline"
+                );
+            }
+            for index in 0..=galley.text().chars().count() {
+                for prefer_next_row in [false, true] {
+                    let cursor = CCursor {
+                        prefer_next_row,
+                        ..CCursor::new(index)
+                    };
+                    let clamped = galley.clamp_cursor(&cursor);
+                    assert_eq!(clamped.index, cursor.index);
+                    assert_eq!(clamped.prefer_next_row, cursor.prefer_next_row);
+                    assert_eq!(
+                        galley.pos_from_cursor(clamped),
+                        galley.pos_from_cursor(cursor)
+                    );
+                }
+            }
+            for prefer_next_row in [false, true] {
+                let cursor = CCursor {
+                    prefer_next_row,
+                    ..CCursor::new(usize::MAX)
+                };
+                let clamped = galley.clamp_cursor(&cursor);
+                assert_eq!(clamped.index, galley.end().index);
+                assert!(
+                    !clamped.prefer_next_row,
+                    "invalid offsets keep canonical end affinity"
+                );
+                assert_eq!(
+                    galley.pos_from_cursor(clamped),
+                    galley.pos_from_cursor(galley.end())
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn clamping_empty_elided_and_cluster_interior_cursors() {
+        // Clamping bounds indices; snapping to grapheme boundaries is a navigation operation.
+        for text in ["", "a\u{301} 👩\u{200d}💻"] {
+            let galley = auto(text);
+            for index in 0..=text.chars().count() {
+                for prefer_next_row in [false, true] {
+                    let cursor = CCursor {
+                        prefer_next_row,
+                        ..CCursor::new(index)
+                    };
+                    let clamped = galley.clamp_cursor(&cursor);
+                    assert_eq!(
+                        (clamped.index, clamped.prefer_next_row),
+                        (cursor.index, prefer_next_row)
+                    );
+                }
+            }
+        }
+        let mut fonts = Fonts::new(TextOptions::default(), FontDefinitions::default());
+        let mut job = LayoutJob::simple(
+            "abc def ghi jkl".to_owned(),
+            FontId::proportional(14.0),
+            Color32::WHITE,
+            30.0,
+        );
+        job.wrap.max_rows = 1;
+        let galley = fonts.with_pixels_per_point(1.0).layout_job(job);
+        assert!(galley.elided);
+        assert!(galley.end().index.0 < galley.text().chars().count());
+        for index in [galley.end().index.0 + 1, galley.text().chars().count()] {
+            let cursor = CCursor {
+                prefer_next_row: true,
+                ..CCursor::new(index)
+            };
+            let clamped = galley.clamp_cursor(&cursor);
+            assert_eq!(clamped.index, galley.end().index);
+            assert!(!clamped.prefer_next_row);
+        }
+    }
+
+    #[test]
+    fn visual_arrows_still_advance_after_clamping_between_passes() {
+        let galley = auto("abc אבג def");
+        let cursors = presses(&galley, galley.begin(), |cursor| {
+            galley.cursor_right_visually(&galley.clamp_cursor(cursor))
+        });
+        assert_eq!(indices(&cursors), &[0, 1, 2, 3, 4, 6, 5, 4, 8, 9, 10, 11]);
+        assert_moves_on_screen(&galley, &cursors, true);
+        let cursors = presses(&galley, galley.end(), |cursor| {
+            galley.cursor_left_visually(&galley.clamp_cursor(cursor))
+        });
+        assert_eq!(indices(&cursors), &[11, 10, 9, 8, 7, 5, 6, 7, 3, 2, 1, 0]);
+        assert_moves_on_screen(&galley, &cursors, false);
+    }
+
     /// One char offset, two places: the cursor sticks to the run it moved past.
     #[test]
     fn affinity_picks_the_run() {

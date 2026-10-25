@@ -6,7 +6,9 @@
 //! named by a protocol the windowing layer doesn't implement) or that must add input to every
 //! viewport before egui processes it can set [`crate::NativeOptions::viewport_hooks`].
 
-use std::sync::{Arc, PoisonError, RwLock};
+use std::sync::Arc;
+
+use parking_lot::RwLock;
 
 /// Callbacks eframe makes for every viewport. All methods have empty defaults.
 ///
@@ -27,12 +29,48 @@ pub trait ViewportHooks: Send + Sync {
 static HOOKS: RwLock<Option<Arc<dyn ViewportHooks>>> = RwLock::new(None);
 
 pub(crate) fn install(hooks: Option<Arc<dyn ViewportHooks>>) {
-    *HOOKS.write().unwrap_or_else(PoisonError::into_inner) = hooks;
+    *HOOKS.write() = hooks;
 }
 
 pub(crate) fn with(f: impl FnOnce(&dyn ViewportHooks)) {
-    let hooks = HOOKS.read().unwrap_or_else(PoisonError::into_inner).clone();
+    let hooks = HOOKS.read().clone();
     if let Some(hooks) = hooks {
         f(&*hooks);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use core::sync::atomic::{AtomicUsize, Ordering};
+
+    use super::*;
+
+    struct CountRawInput(AtomicUsize);
+
+    impl ViewportHooks for CountRawInput {
+        fn raw_input(&self, _ctx: &egui::Context, raw_input: &mut egui::RawInput) {
+            self.0.fetch_add(1, Ordering::Relaxed);
+            raw_input.focused = false;
+        }
+    }
+
+    #[test]
+    fn installed_hooks_run_until_replaced() {
+        let hooks = Arc::new(CountRawInput(AtomicUsize::new(0)));
+        let options = crate::NativeOptions {
+            viewport_hooks: Some(Arc::clone(&hooks) as Arc<dyn ViewportHooks>),
+            ..Default::default()
+        };
+        install(options.clone().viewport_hooks);
+
+        let ctx = egui::Context::default();
+        let mut raw_input = egui::RawInput::default();
+        with(|h| h.raw_input(&ctx, &mut raw_input));
+        assert_eq!(hooks.0.load(Ordering::Relaxed), 1);
+        assert!(!raw_input.focused, "the hook can change the input");
+
+        install(None);
+        with(|h| h.raw_input(&ctx, &mut raw_input));
+        assert_eq!(hooks.0.load(Ordering::Relaxed), 1);
     }
 }
